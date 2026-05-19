@@ -4,15 +4,15 @@ mode: purified_phage
 
 samples_file: config/samples.tsv
 
-threads: 8
-memory_gb: 32
+threads: 16
+memory_gb: 16
 
 databases:
   checkv:   databases/checkv_db/checkv-db-v1.5
   pharokka: databases/pharokka_db
   genomad:  databases/genomad_db
   phold:    databases/phold_db
-  # kraken2: /path/to/kraken2_db
+  kraken2: /path/to/kraken2_db
 
 envs:
   main:      phageflow

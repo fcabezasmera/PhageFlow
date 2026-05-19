@@ -4,12 +4,11 @@ mode: purified_phage
 
 samples_file: config/samples.tsv
 
-threads: 22
-memory_gb: 64
+threads: 24
+memory_gb: 32
 
 dirs:
   databases: databases
-  hosts:     data/host_genomes
   results:   results
   reports:   reports
 

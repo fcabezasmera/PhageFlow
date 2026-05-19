@@ -6,3 +6,8 @@ test/
 __pycache__/
 .snakemake/
 *.pyc
+config/samples.tsv
+phageflow.egg-info/
+envs/
+.Rhistory
+cleanup.sh
