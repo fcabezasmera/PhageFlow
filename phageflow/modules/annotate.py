@@ -14,21 +14,14 @@ Pharokka v1.6+ (Bouras et al. 2023, Bioinformatics):
     --gene_predict_hmm       : PHANOTATE + HMMER hybrid calling for better
                                sensitivity on divergent phages.
 
-    Outputs: {sample}.gbk, {sample}.gff, {sample}_pharokka.tsv,
-             {sample}_cds_functions.tsv
-
 Phold v0.2+ (Bouras et al. 2024):
     Protein structure-based annotation using ProstT5 language model
     and Foldseek structural alignment to PHROGs.
     Complements Pharokka by assigning function to hypothetical proteins
     that lack sequence homology.
 
-    --cpu                    : number of threads (structure predictions are
-                               memory-intensive — use fewer threads than assembly).
-    --skip_extra_annotations : skip tRNA/tmRNA (already done in Pharokka).
-
-    Run after Pharokka — takes {sample}.gbk as input.
-    Outputs updated {sample}_phold.gbk with enhanced annotations.
+    Phold lives in a separate conda environment (cfg.envs.phold).
+    It is invoked automatically via `conda run` — no manual env switching needed.
 
 Integration strategy:
     Pharokka → base annotation (sequence homology to PHROGs)
@@ -37,6 +30,7 @@ Integration strategy:
 """
 
 from __future__ import annotations
+import shutil
 from pathlib import Path
 
 from phageflow.utils.config import Config
@@ -44,7 +38,7 @@ from phageflow.utils.logger import log_step, log_info, log_ok, log_warn, log_err
 from phageflow.utils.tools import require_tools, run_silent, human_size, mkdirs, fasta_stats
 
 STEP  = "06_annotation"
-TOOLS = ["pharokka.py", "phold"]
+TOOLS = ["pharokka.py"]          # phold is in a separate env — checked at runtime
 
 
 def run(
@@ -82,7 +76,8 @@ def run(
     log_info(f"  Genome : {human_size(genome)} | {s['n']} contig(s) | "
              f"largest={s['largest_bp']}bp")
     log_info("  [1/2] Pharokka: PHANOTATE + PHROG (Bouras et al. 2023)")
-    log_info("  [2/2] Phold: structure-based functional annotation (Bouras et al. 2024)")
+    log_info(f"  [2/2] Phold: structure-based annotation via "
+             f"conda run -n {cfg.envs.phold} (Bouras et al. 2024)")
 
     pharokka_db = cfg.databases.pharokka
     phold_db    = cfg.databases.phold
@@ -100,8 +95,7 @@ def run(
     if gbk_out.exists() and gbk_out.stat().st_size > 0 and not force:
         log_info("  [Pharokka] already exists — skipping")
     else:
-        n_ctg = s["n"]
-        mode_flag = "--meta" if n_ctg > 1 else "--single"
+        n_ctg     = s["n"]
         log_info(f"  [Pharokka] mode: {'meta' if n_ctg > 1 else 'single'} "
                  f"({n_ctg} contig{'s' if n_ctg > 1 else ''})")
         try:
@@ -111,9 +105,7 @@ def run(
                 "-o", str(pharokka_dir),
                 "-d", str(pharokka_db),
                 "-p", sample_id,
-                mode_flag,
-                "--dnaapler", "all",
-                "--gene_predict_hmm",
+                "--dnaapler",
                 "--threads", str(cfg.threads),
                 "--force",
             ], log_file=rpt_dir / f"{sample_id}_pharokka.log")
@@ -130,41 +122,49 @@ def run(
             f"hypothetical={pharokka_stats['hypothetical']}"
         )
 
-    # ── Phold ─────────────────────────────────────────────────────────────────
+    # ── Phold (via conda run — separate environment) ───────────────────────────
     phold_dir = sdir / "phold"
     gbk_phold = phold_dir / f"{sample_id}_phold.gbk"
     mkdirs(phold_dir)
 
-    if gbk_phold.exists() and gbk_phold.stat().st_size > 0 and not force:
+    phold_env = cfg.envs.phold     # "phold"
+
+    if not shutil.which("conda"):
+        log_warn("  [Phold] conda not found in PATH — skipping Phold")
+        phold_stats = {}
+    elif gbk_phold.exists() and gbk_phold.stat().st_size > 0 and not force:
         log_info("  [Phold] already exists — skipping")
+        phold_stats = _parse_phold_tsv(phold_dir / f"{sample_id}_phold.tsv")
     elif gbk_out.exists():
-        log_info("  [Phold] structural annotation...")
+        log_info(f"  [Phold] running via conda run -n {phold_env} ...")
         try:
             run_silent([
+                "conda", "run", "-n", phold_env,
                 "phold", "run",
                 "-i", str(gbk_out),
                 "-o", str(phold_dir),
                 "-p", sample_id,
                 "-d", str(phold_db),
-                "--cpu", str(cfg.threads),
-                "--skip_extra_annotations",
+                "-t", str(cfg.threads),
                 "--force",
             ], log_file=rpt_dir / f"{sample_id}_phold.log")
             log_ok("  [Phold] OK")
         except Exception as e:
             log_warn(f"  [Phold] warning: {e}")
+        phold_stats = _parse_phold_tsv(phold_dir / f"{sample_id}_phold.tsv")
     else:
         log_warn("  [Phold] skipped — no Pharokka GBK found")
+        phold_stats = {}
 
-    phold_stats = _parse_phold_tsv(phold_dir / f"{sample_id}_phold.tsv")
     if phold_stats:
         log_ok(
             f"  [Phold] upgraded={phold_stats['upgraded']} hypothetical proteins "
             f"→ function assigned"
         )
 
-    # ── Summary TSV ───────────────────────────────────────────────────────────
+    # ── Final output ──────────────────────────────────────────────────────────
     final_gbk = gbk_phold if gbk_phold.exists() else gbk_out
+
     _save_tsv(
         sample_id, genome,
         pharokka_stats or {}, phold_stats or {},
@@ -205,8 +205,10 @@ def _parse_pharokka_tsv(tsv: Path) -> dict:
     hypo = total - annotated
     pct  = f"{annotated / total * 100:.1f}%" if total else "0.0%"
     return {
-        "total_cds": total, "annotated": annotated,
-        "hypothetical": hypo, "pct_annotated": pct,
+        "total_cds":    total,
+        "annotated":    annotated,
+        "hypothetical": hypo,
+        "pct_annotated": pct,
     }
 
 
