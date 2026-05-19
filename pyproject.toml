@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phageflow"
+version = "0.1.0"
+description = "A modular pipeline for bacteriophage genomics from Illumina sequencing"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Fausto Cabezas-Mera", email = "fcabezasmera@utem.cl" }
+]
+keywords = ["phage", "genomics", "bioinformatics", "bacteriophage", "pipeline"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "biopython>=1.80",
+    "pandas>=2.0",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+phageflow = "phageflow.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/fcabezasmera/PhageFlow"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["phageflow*"]
+
+[tool.setuptools.package-data]
+phageflow = ["config/*.yaml", "config/*.tsv"]

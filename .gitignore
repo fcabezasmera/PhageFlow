@@ -1,0 +1,8 @@
+results/
+databases/
+test/
+*.log
+*.tmp
+__pycache__/
+.snakemake/
+*.pyc

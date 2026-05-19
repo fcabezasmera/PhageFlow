@@ -1,0 +1,9 @@
+sample_id	r1	r2
+s1	/home/labinfo/Escritorio/pf/test/samples/uisek/01/2408231-001-WGS_S6_L001_R1_001.fastq	/home/labinfo/Escritorio/pf/test/samples/uisek/01/2408231-001-WGS_S6_L001_R2_001.fastq
+s2	/home/labinfo/Escritorio/pf/test/samples/uisek/02/25031103-001-WGS_S1_L001_R1_001.fastq	/home/labinfo/Escritorio/pf/test/samples/uisek/02/25031103-001-WGS_S1_L001_R2_001.fastq
+s3	/home/labinfo/Escritorio/pf/test/samples/uisek/03/25041504-002-WGS_S2_L001_R1_001.fastq	/home/labinfo/Escritorio/pf/test/samples/uisek/03/25041504-002-WGS_S2_L001_R2_001.fastq
+s4	/home/labinfo/Escritorio/pf/test/samples/uisek/04/25041504-001-WGS_S1_L001_R1_001.fastq	/home/labinfo/Escritorio/pf/test/samples/uisek/04/25041504-001-WGS_S1_L001_R2_001.fastq
+uce01	/home/labinfo/Escritorio/pf/test/samples/uce/01/1_S1_L001_R1_001.fastq	/home/labinfo/Escritorio/pf/test/samples/uce/01/1_S1_L001_R2_001.fastq
+uce02	/home/labinfo/Escritorio/pf/test/samples/uce/02/2_S2_L001_R1_001.fastq	/home/labinfo/Escritorio/pf/test/samples/uce/02/2_S2_L001_R2_001.fastq
+uce03	/home/labinfo/Escritorio/pf/test/samples/uce/03/3_S3_L001_R1_001.fastq	/home/labinfo/Escritorio/pf/test/samples/uce/03/3_S3_L001_R2_001.fastq
+uce04	/home/labinfo/Escritorio/pf/test/samples/uce/04/4_S4_L001_R1_001.fastq	/home/labinfo/Escritorio/pf/test/samples/uce/04/4_S4_L001_R2_001.fastq
