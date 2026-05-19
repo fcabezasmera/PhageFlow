@@ -1,13 +1,33 @@
+# Runtime outputs
 results/
+reports/
+output/
+
+# Databases (too large)
 databases/
+
+# Conda environments
+envs/
+
+# Sample data (machine-specific paths and large files)
+config/samples.tsv
 test/
+data/
+
+# Python build artifacts
+phageflow.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
+# Snakemake
+.snakemake/
+*.snakemake.log
+
+# Logs and temp
 *.log
 *.tmp
-__pycache__/
-.snakemake/
-*.pyc
-config/samples.tsv
-phageflow.egg-info/
-envs/
+
+# Local files
 .Rhistory
 cleanup.sh
