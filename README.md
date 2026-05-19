@@ -17,6 +17,7 @@ annotation → biosafety → lifecycle → final genomes
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Samples file](#samples-file)
+- [Environment setup](#environment-setup)
 - [Modules](#modules)
   - [01 qc](#01-qc)
   - [02 host-removal](#02-host-removal)
@@ -73,7 +74,20 @@ conda create -n pholdENV -c conda-forge -c bioconda phold -y
 conda create -n bacphlip_env -c conda-forge -c bioconda bacphlip -y
 ```
 
-### 4. Set up databases
+### 4. Register the PhageFlow CLI in every environment
+
+Modules that require a separate environment (geNomad, Phold, BACPHLIP) still
+need access to the `phageflow` command. Register it once per environment
+without touching its dependencies:
+
+```bash
+conda activate genomad    && pip install -e . --no-deps -q
+conda activate pholdENV   && pip install -e . --no-deps -q
+conda activate bacphlip_env && pip install -e . --no-deps -q
+conda activate phageflow  # return to main env
+```
+
+### 5. Set up databases
 
 ```bash
 # CheckV
@@ -93,9 +107,11 @@ phold install -d databases/phold_db
 # (Optional) Kraken2 — only for auto host detection
 kraken2-build --download-library bacteria --db databases/k2_db
 kraken2-build --build --db databases/k2_db
+
+conda activate phageflow
 ```
 
-### 5. Verify installation
+### 6. Verify installation
 
 ```bash
 phageflow check-tools
@@ -110,32 +126,41 @@ phageflow check-tools
 phageflow config   # creates config/config.yaml
 phageflow samples  # creates config/samples.tsv
 
-# Edit samples.tsv with your data, then run each module:
+# Edit samples.tsv with your data, then run each module.
+# Stay in the phageflow environment throughout — use conda run for
+# modules that require a separate environment (viral-id, annotate, lifecycle).
+
 conda activate phageflow
 
 phageflow qc           --sample-id s1 --r1 data/s1_R1.fastq.gz --r2 data/s1_R2.fastq.gz
-phageflow host-removal --sample-id s1 --r1 results/01_qc/s1_R1.fastq.gz \
-                                       --r2 results/01_qc/s1_R2.fastq.gz \
-                                       --host-file /path/to/host.fasta
-phageflow assembly     --sample-id s1 --r1 results/02_host_removal/s1_R1.fastq.gz \
-                                       --r2 results/02_host_removal/s1_R2.fastq.gz
 
-conda activate genomad
-phageflow viral-id --sample-id s1 \
+phageflow host-removal --sample-id s1 \
+    --r1 results/01_qc/s1_R1.fastq.gz \
+    --r2 results/01_qc/s1_R2.fastq.gz \
+    --host-file /path/to/host.fasta
+
+phageflow assembly     --sample-id s1 \
+    --r1 results/02_host_removal/s1_R1.fastq.gz \
+    --r2 results/02_host_removal/s1_R2.fastq.gz
+
+conda run -n genomad phageflow viral-id --sample-id s1 \
     --contigs results/03_assembly/combined/s1_contigs_nr.fasta
 
-conda activate phageflow
 phageflow quality   --sample-id s1 \
     --virus-fna results/04_viral_id/s1_virus.fna
+
 phageflow annotate  --sample-id s1 \
     --genome results/05_quality/annotation_ready/s1_HQ.fasta
+
 phageflow safety    --sample-id s1 \
     --genome results/05_quality/annotation_ready/s1_HQ.fasta
 
-conda activate bacphlip_env
-phageflow lifecycle --sample-id s1 \
+conda run -n bacphlip_env phageflow lifecycle --sample-id s1 \
     --genome results/05_quality/annotation_ready/s1_HQ.fasta
 ```
+
+> **Tip:** you never need to leave the `phageflow` environment.
+> Use `conda run -n <env>` for modules that require geNomad, Phold, or BACPHLIP.
 
 ---
 
@@ -193,6 +218,29 @@ s2	/path/to/s2_R1.fastq.gz	/path/to/s2_R2.fastq.gz
 
 ---
 
+## Environment setup
+
+PhageFlow uses a main environment (`phageflow`) plus three tool-specific
+environments. You only need to activate `phageflow`; all other environments
+are invoked via `conda run`.
+
+| Environment    | Tools           | Used by modules    |
+|----------------|-----------------|--------------------|
+| `phageflow`    | all core tools  | 01–03, 05–07       |
+| `genomad`      | geNomad         | 04 viral-id        |
+| `pholdENV`     | Phold           | 06 annotate        |
+| `bacphlip_env` | BACPHLIP        | 08 lifecycle       |
+
+```bash
+# One-time setup: register CLI in each env
+conda activate genomad      && pip install -e . --no-deps -q
+conda activate pholdENV     && pip install -e . --no-deps -q
+conda activate bacphlip_env && pip install -e . --no-deps -q
+conda activate phageflow
+```
+
+---
+
 ## Modules
 
 ### 01 qc
@@ -241,7 +289,7 @@ phageflow host-removal --sample-id s1 --r1 R1.fq.gz --r2 R2.fq.gz \
 phageflow host-removal --sample-id s1 --r1 R1.fq.gz --r2 R2.fq.gz
 ```
 
-**Kraken2 filter parameters:** `--confidence 0.2 --minimum-hit-groups 2`
+**Kraken2 filter parameters:** `--confidence 0.2 --minimum-hit-groups 2`  
 Keeps unclassified reads (novel phage) + Viruses (taxid 10239).
 
 **Outputs:** `results/02_host_removal/{sample}_R1/R2.fastq.gz`
@@ -275,18 +323,18 @@ phageflow assembly \
 
 **Viral identification** with geNomad.
 
-> **Requires:** `conda activate genomad`
+> **Requires geNomad environment** — use `conda run` (no need to switch envs):
 
 ```bash
-conda activate genomad
-phageflow viral-id \
+conda run -n genomad phageflow viral-id \
   --sample-id s1 \
   --contigs results/03_assembly/combined/s1_contigs_nr.fasta
 ```
 
-geNomad classifies contigs as virus / plasmid / chromosome and detects integrated proviruses. Default `--min-score 0.7` (configurable in `config.yaml`).
+geNomad classifies contigs as virus / plasmid / chromosome and detects integrated proviruses.
+Default `--min-score 0.7` (configurable in `config.yaml`).
 
-**Outputs:** `results/04_viral_id/{sample}_virus.fna`, taxonomy and plasmid summaries.
+**Outputs:** `results/04_viral_id/{sample}_virus.fna`, `reports/04_viral_id/genomad_summary.tsv`
 
 ---
 
@@ -300,21 +348,24 @@ phageflow quality \
   --virus-fna results/04_viral_id/s1_virus.fna
 ```
 
-**Quality tiers:**
+**Quality tiers (MIUVIG standard):**
 
 | Tier | Completeness | Destination |
 |---|---|---|
 | Complete / High-quality | ≥ configured threshold | `annotation_ready/` |
 | Medium-quality | below threshold | `drafts/` |
-| Low-quality | — | discarded |
+| Low-quality / Not-determined | — | discarded |
 
-**Outputs:** `results/05_quality/annotation_ready/{sample}_HQ.fasta`
+**Outputs:** `results/05_quality/annotation_ready/{sample}_HQ.fasta`,
+`reports/05_quality/checkv_summary.tsv`
 
 ---
 
 ### 06 annotate
 
 **Structural and functional annotation** using Pharokka (sequence homology) + Phold (structure-based).
+
+> **Phold requires its own environment** — invoked automatically via `conda run`:
 
 ```bash
 phageflow annotate \
@@ -370,11 +421,10 @@ phageflow safety \
 
 **Lifecycle prediction** (virulent / temperate) with BACPHLIP.
 
-> **Requires:** `conda activate bacphlip_env`
+> **Requires BACPHLIP environment** — use `conda run` (no need to switch envs):
 
 ```bash
-conda activate bacphlip_env
-phageflow lifecycle \
+conda run -n bacphlip_env phageflow lifecycle \
   --sample-id s1 \
   --genome results/05_quality/annotation_ready/s1_HQ.fasta
 ```
@@ -405,7 +455,9 @@ results/
 │   ├── spades/{sample}/    SPAdes output
 │   ├── megahit/{sample}/   MEGAHIT output
 │   └── combined/           *_contigs_nr.fasta  ← geNomad input
-├── 04_viral_id/            *_virus.fna  ← CheckV input
+├── 04_viral_id/
+│   ├── {sample}/           geNomad working directory
+│   └── {sample}_virus.fna  ← CheckV input
 ├── 05_quality/
 │   ├── annotation_ready/   *_HQ.fasta  ← annotation / safety / lifecycle input
 │   └── drafts/             *_draft.fasta
@@ -430,53 +482,55 @@ reports/
 
 ## Running all samples in a loop
 
-PhageFlow processes one sample at a time by design. Use a shell loop for batch processing:
+PhageFlow processes one sample at a time by design. Use a shell loop for batch processing.
+Stay in `phageflow` throughout — `conda run` handles tool-specific environments.
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
+conda activate phageflow
+
 CONFIG="config/config.yaml"
+SAMPLES=(s1 s2 s3 s4 uce01 uce02 uce03 uce04)
+HOST="/path/to/host.fasta"
 
-while IFS=$'\t' read -r sample_id r1 r2; do
-    [[ "$sample_id" == "sample_id" || "$sample_id" == \#* ]] && continue
-    echo "=== Processing: $sample_id ==="
+for sample in "${SAMPLES[@]}"; do
+    echo "=== Processing: $sample ==="
 
-    conda run -n phageflow phageflow qc \
-        -c "$CONFIG" --sample-id "$sample_id" --r1 "$r1" --r2 "$r2"
+    phageflow qc -c "$CONFIG" --sample-id "$sample" \
+        --r1 "$(grep "^${sample}" config/samples.tsv | cut -f2)" \
+        --r2 "$(grep "^${sample}" config/samples.tsv | cut -f3)"
 
-    conda run -n phageflow phageflow host-removal \
-        -c "$CONFIG" --sample-id "$sample_id" \
-        --r1 "results/01_qc/${sample_id}_R1.fastq.gz" \
-        --r2 "results/01_qc/${sample_id}_R2.fastq.gz" \
-        --host-file /path/to/host.fasta
+    phageflow host-removal -c "$CONFIG" --sample-id "$sample" \
+        --r1 "results/01_qc/${sample}_R1.fastq.gz" \
+        --r2 "results/01_qc/${sample}_R2.fastq.gz" \
+        --host-file "$HOST"
 
-    conda run -n phageflow phageflow assembly \
-        -c "$CONFIG" --sample-id "$sample_id" \
-        --r1 "results/02_host_removal/${sample_id}_R1.fastq.gz" \
-        --r2 "results/02_host_removal/${sample_id}_R2.fastq.gz"
+    phageflow assembly -c "$CONFIG" --sample-id "$sample" \
+        --r1 "results/02_host_removal/${sample}_R1.fastq.gz" \
+        --r2 "results/02_host_removal/${sample}_R2.fastq.gz"
 
-    conda run -n genomad phageflow viral-id \
-        -c "$CONFIG" --sample-id "$sample_id" \
-        --contigs "results/03_assembly/combined/${sample_id}_contigs_nr.fasta"
+    conda run -n genomad phageflow viral-id -c "$CONFIG" --sample-id "$sample" \
+        --contigs "results/03_assembly/combined/${sample}_contigs_nr.fasta"
 
-    conda run -n phageflow phageflow quality \
-        -c "$CONFIG" --sample-id "$sample_id" \
-        --virus-fna "results/04_viral_id/${sample_id}_virus.fna"
+    phageflow quality -c "$CONFIG" --sample-id "$sample" \
+        --virus-fna "results/04_viral_id/${sample}_virus.fna"
 
-    GENOME="results/05_quality/annotation_ready/${sample_id}_HQ.fasta"
-    [[ ! -f "$GENOME" ]] && echo "  No HQ genome for $sample_id — skipping annotation" && continue
+    GENOME="results/05_quality/annotation_ready/${sample}_HQ.fasta"
+    if [[ ! -f "$GENOME" ]]; then
+        echo "  No HQ genome for $sample — skipping annotation"
+        continue
+    fi
 
-    conda run -n phageflow phageflow annotate \
-        -c "$CONFIG" --sample-id "$sample_id" --genome "$GENOME"
+    phageflow annotate -c "$CONFIG" --sample-id "$sample" --genome "$GENOME"
 
-    conda run -n phageflow phageflow safety \
-        -c "$CONFIG" --sample-id "$sample_id" --genome "$GENOME"
+    phageflow safety -c "$CONFIG" --sample-id "$sample" --genome "$GENOME"
 
-    conda run -n bacphlip_env phageflow lifecycle \
-        -c "$CONFIG" --sample-id "$sample_id" --genome "$GENOME"
+    conda run -n bacphlip_env phageflow lifecycle -c "$CONFIG" \
+        --sample-id "$sample" --genome "$GENOME"
 
-done < config/samples.tsv
+done
 
 echo "=== All samples done ==="
 ```
@@ -518,9 +572,9 @@ If you use PhageFlow, please cite the underlying tools:
 
 ## Author
 
-Fausto Cabezas-Mera · fcabezasmera@utem.cl
-Estefania Tisalema Guanopatin · etisalemag@correo.uss.cl
-Antonella Nole
+Fausto Cabezas-Mera · fcabezasmera@utem.cl  
+Estefania Tisalema Guanopatin · etisalemag@correo.uss.cl  
+Antonella Nole  
 Dayra Valle
 
 PhageFlow is released under the MIT License.

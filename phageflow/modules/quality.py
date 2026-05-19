@@ -1,29 +1,57 @@
 """PhageFlow Module 05 — Genome quality assessment and selection.
 
-Tools:
-    CheckV : completeness, contamination, topology (DTR/ITR)
+Tool:
+    CheckV (Nayfach et al. 2021, Nature Biotechnology):
+        Estimates completeness, contamination, and topology (DTR/ITR)
+        for viral genomes using a database of complete viral genomes.
 
-Quality tiers:
-    Complete / High-quality  → annotation_ready/  (full annotation)
-    Medium-quality           → drafts/             (reported in supplement)
-    Low-quality              → discarded from main analysis
+        end_to_end   : runs all CheckV steps in one command.
+        --remove_tmp : removes large intermediate files after run.
+
+Quality tiers (MIUVIG standard):
+    Complete / High-quality  ≥ min_completeness  → annotation_ready/
+    Medium-quality           < min_completeness  → drafts/
+    Low-quality / Not-determined                 → discarded
+
+Input  : results/04_viral_id/{sample}_virus.fna
+Output : results/05_quality/annotation_ready/{sample}_HQ.fasta  ← annotation input
+         results/05_quality/drafts/{sample}_draft.fasta
+         reports/05_quality/checkv_summary.tsv
 """
 
 from __future__ import annotations
 from pathlib import Path
-from typing import List
 
-from phageflow.utils.config import Config, Sample
-from phageflow.utils.logger import log_step, log_info, log_ok, log_warn
+from phageflow.utils.config import Config
+from phageflow.utils.logger import log_step, log_info, log_ok, log_warn, log_error
 from phageflow.utils.tools import require_tools, run_silent, mkdirs
 
 STEP  = "05_quality"
 TOOLS = ["checkv"]
 
 
-def run(cfg: Config, samples: List[Sample], force: bool = False) -> None:
+def run(
+    cfg:       Config,
+    sample_id: str,
+    virus_fna: Path,
+    force:     bool = False,
+) -> Path:
+    """
+    Assess genome quality with CheckV and select HQ genomes.
+
+    Parameters
+    ----------
+    sample_id : sample identifier
+    virus_fna : viral contigs FASTA (output of viral-id step)
+
+    Returns
+    -------
+    hq_fasta : Path to annotation-ready HQ genome FASTA
+               (empty/missing if no HQ genomes found)
+    """
     require_tools(*TOOLS)
 
+    virus_fna = Path(virus_fna)
     out_dir   = cfg.results(STEP)
     rpt_dir   = cfg.reports(STEP)
     final_dir = out_dir / "annotation_ready"
@@ -32,108 +60,135 @@ def run(cfg: Config, samples: List[Sample], force: bool = False) -> None:
 
     db = cfg.databases.checkv
     if not db.exists():
-        log_warn(f"CheckV database not found: {db}")
+        log_warn(f"  CheckV database not found: {db}")
 
-    log_step(f"Module 05 — CheckV quality assessment ({len(samples)} samples · {cfg.threads} threads)")
+    log_step(f"Module 05 — CheckV quality assessment [{sample_id}] · {cfg.threads} threads")
 
-    summary_rows  = []
-    selected_rows = []
+    if not virus_fna.exists():
+        log_error(f"  Virus FASTA not found: {virus_fna}")
+        raise FileNotFoundError(virus_fna)
 
-    for sample in samples:
-        fa = cfg.results("04_viral_id") / f"{sample.sample_id}_virus.fna"
-        if not fa.exists():
-            log_warn(f"[{sample.sample_id}] virus.fna not found")
-            continue
+    n_input = sum(1 for l in open(virus_fna) if l.startswith(">"))
+    log_info(f"  Input   : {n_input} viral contig(s)")
+    log_info(f"  HQ threshold : completeness ≥ {cfg.checkv.min_completeness}%")
+    log_info("  Nayfach et al. 2021, Nature Biotechnology")
 
-        n_input = sum(1 for l in open(fa) if l.startswith(">"))
-        log_step(f"[{sample.sample_id}]  {sample.cohort}  |  {n_input} viral contigs")
+    # ── CheckV end-to-end ─────────────────────────────────────────────────────
+    sdir  = out_dir / sample_id
+    qfile = sdir / "quality_summary.tsv"
 
-        sdir   = out_dir / sample.sample_id
-        qfile  = sdir / "quality_summary.tsv"
+    if qfile.exists() and qfile.stat().st_size > 0 and not force:
+        log_info("  Already processed — skipping (use --force to re-run)")
+    else:
+        mkdirs(sdir)
+        log_info("  [CheckV] running end-to-end assessment...")
+        try:
+            run_silent([
+                "checkv", "end_to_end",
+                str(virus_fna), str(sdir),
+                "-d", str(db),
+                "-t", str(cfg.threads),
+                "--remove_tmp",
+            ], log_file=rpt_dir / f"{sample_id}_checkv.log")
+            log_ok("  [CheckV] OK")
+        except Exception as e:
+            log_warn(f"  [CheckV] warning: {e}")
 
-        if qfile.exists() and not force:
-            log_info("  Already processed — skipping")
-        else:
-            mkdirs(sdir)
-            try:
-                run_silent([
-                    "checkv", "end_to_end",
-                    str(fa), str(sdir),
-                    "-d", str(db),
-                    "-t", str(cfg.threads),
-                    "--remove_tmp",
-                ], log_file=rpt_dir / f"{sample.sample_id}_checkv.log")
-            except Exception as e:
-                log_warn(f"  CheckV warning: {e}")
+    # ── Parse and select genomes ──────────────────────────────────────────────
+    if not qfile.exists():
+        log_warn(f"  No CheckV output found — check log: "
+                 f"reports/05_quality/{sample_id}_checkv.log")
+        return final_dir / f"{sample_id}_HQ.fasta"
 
-        if qfile.exists():
-            row, sel = _parse_checkv(sample, fa, qfile, final_dir, draft_dir)
-            summary_rows.append(row)
-            selected_rows.extend(sel)
-            log_ok(
-                f"  [{sample.sample_id}] "
-                f"Complete={row['complete']} HQ={row['hq']} "
-                f"MQ={row['mq']} LQ={row['lq']} | "
-                f"best={row['best_length']} {row['best_quality']}"
-            )
-        else:
-            log_warn(f"  [{sample.sample_id}] no CheckV output")
+    seqs        = _load_fasta(virus_fna)
+    row, hq_seqs, draft_seqs = _parse_checkv(sample_id, qfile, seqs,
+                                              cfg.checkv.min_completeness)
 
-    log_step("CheckV summary")
-    _print_table(summary_rows)
+    hq_fasta    = final_dir / f"{sample_id}_HQ.fasta"
+    draft_fasta = draft_dir / f"{sample_id}_draft.fasta"
 
-    log_step("Selected genomes")
-    _print_table(selected_rows)
+    _write_fasta(hq_seqs,    hq_fasta)
+    _write_fasta(draft_seqs, draft_fasta)
 
-    _save_tsv(summary_rows, rpt_dir / "checkv_summary.tsv")
-    _save_tsv(selected_rows, rpt_dir / "genome_selection.tsv")
+    log_ok(
+        f"  [{sample_id}] "
+        f"Complete={row['complete']} HQ={row['hq']} "
+        f"MQ={row['mq']} LQ={row['lq']} | "
+        f"best={row['best_length']} {row['best_quality']}"
+    )
 
-    n_hq    = len([f for f in final_dir.glob("*_HQ.fasta")])
-    n_draft = len([f for f in draft_dir.glob("*_draft.fasta")])
-    log_ok(f"Annotation-ready : {final_dir}/  ({n_hq} genomes)")
-    log_ok(f"Drafts           : {draft_dir}/  ({n_draft} genomes)")
-    log_step("Module 05 completed ✓")
-    log_info("Next: phageflow annotate")
+    if hq_seqs:
+        log_ok(f"  Annotation-ready : {hq_fasta}  ({len(hq_seqs)} genome(s))")
+    else:
+        log_warn(f"  No HQ genomes for {sample_id} — only drafts or nothing")
+        if draft_seqs:
+            log_warn(f"  Draft genomes    : {draft_fasta}  ({len(draft_seqs)} genome(s))")
+
+    _save_tsv(row, rpt_dir / "checkv_summary.tsv")
+
+    log_step(f"Module 05 completed ✓  [{sample_id}]")
+    log_info("Next: phageflow annotate --sample-id <id> --genome <HQ.fasta>")
+
+    return hq_fasta
 
 
-def _parse_checkv(
-    sample: Sample, fa: Path, qfile: Path,
-    final_dir: Path, draft_dir: Path
-) -> tuple:
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _load_fasta(path: Path) -> dict:
+    """Load FASTA into {seq_id: sequence} dict."""
     seqs = {}
-    with open(fa) as f:
-        hdr = seq = ""
+    hdr = seq = ""
+    with open(path) as f:
         for line in f:
             line = line.rstrip()
             if line.startswith(">"):
-                if hdr: seqs[hdr.lstrip(">").split()[0]] = seq
-                hdr, seq = line, ""
-            else: seq += line
-        if hdr: seqs[hdr.lstrip(">").split()[0]] = seq
+                if hdr:
+                    seqs[hdr] = seq
+                hdr = line[1:].split()[0]
+                seq = ""
+            else:
+                seq += line
+    if hdr:
+        seqs[hdr] = seq
+    return seqs
 
+
+def _parse_checkv(
+    sample_id: str,
+    qfile:     Path,
+    seqs:      dict,
+    min_completeness: float,
+) -> tuple:
     complete = hq = mq = lq = 0
-    best_len = best_q = best_comp = "0"
-    hq_seqs = []; draft_seqs = []
+    best_len = 0
+    best_quality = ""
+    hq_seqs    = []
+    draft_seqs = []
 
     with open(qfile) as f:
         header = f.readline().strip().split("\t")
-        col = {h: i for i, h in enumerate(header)}
+        col    = {h: i for i, h in enumerate(header)}
         for line in f:
             row = line.strip().split("\t")
-            cid  = row[col.get("contig_id", 0)]
-            clen = row[col.get("contig_length", 1)]
-            comp = row[col.get("completeness", 9)]
-            qual = row[col.get("checkv_quality", 7)]
+            if not row or len(row) < 3:
+                continue
+            cid  = row[col.get("contig_id",       0)]
+            clen = row[col.get("contig_length",    1)]
+            qual = row[col.get("checkv_quality",   7)]
+            comp = row[col.get("completeness",     9)]
             seq  = seqs.get(cid, "")
 
-            if qual == "Complete":       complete += 1
-            elif qual == "High-quality": hq       += 1
-            elif qual == "Medium-quality": mq     += 1
-            else:                          lq     += 1
+            if qual == "Complete":           complete += 1
+            elif qual == "High-quality":     hq       += 1
+            elif qual == "Medium-quality":   mq       += 1
+            else:                            lq       += 1
 
             try:
-                if int(clen) > int(best_len):
-                    best_len = clen; best_q = qual; best_comp = comp
+                if int(clen) > best_len:
+                    best_len     = int(clen)
+                    best_quality = f"{comp}% {qual}"
             except ValueError:
                 pass
 
@@ -143,50 +198,39 @@ def _parse_checkv(
                 elif qual == "Medium-quality":
                     draft_seqs.append((cid, seq, clen, comp, qual))
 
-    def _write(seqs_list, out_path):
-        if not seqs_list: return
-        with open(out_path, "w") as o:
-            for cid, seq, *_ in seqs_list:
-                o.write(f">{cid}\n{seq}\n")
-
-    _write(hq_seqs,    final_dir / f"{sample.sample_id}_HQ.fasta")
-    _write(draft_seqs, draft_dir / f"{sample.sample_id}_draft.fasta")
-
-    summary_row = {
-        "sample": sample.sample_id, "cohort": sample.cohort,
-        "complete": complete, "hq": hq, "mq": mq, "lq": lq,
-        "best_length": f"{best_len}bp",
-        "best_quality": f"{best_comp}% {best_q}",
+    summary = {
+        "sample":       sample_id,
+        "complete":     complete,
+        "hq":           hq,
+        "mq":           mq,
+        "lq":           lq,
+        "best_length":  f"{best_len}bp",
+        "best_quality": best_quality,
     }
-    selected = [
-        {"sample": sample.sample_id, "tier": "HQ",
-         "contig_id": cid, "length_bp": clen, "completeness": comp, "quality": qual}
-        for cid, _, clen, comp, qual in hq_seqs
-    ] + [
-        {"sample": sample.sample_id, "tier": "draft",
-         "contig_id": cid, "length_bp": clen, "completeness": comp, "quality": qual}
-        for cid, _, clen, comp, qual in draft_seqs
-    ]
-    return summary_row, selected
+    return summary, hq_seqs, draft_seqs
 
 
-def _print_table(rows):
-    if not rows: return
-    headers = list(rows[0].keys())
-    widths  = {h: len(h) for h in headers}
-    for row in rows:
-        for h in headers:
-            widths[h] = max(widths[h], len(str(row.get(h,""))))
-    print("  "+"  ".join(h.ljust(widths[h]) for h in headers))
-    print("  "+"-"*(sum(widths.values())+2*len(headers)))
-    for row in rows:
-        print("  "+"  ".join(str(row.get(h,"")).ljust(widths[h]) for h in headers))
+def _write_fasta(seqs_list: list, out_path: Path) -> None:
+    if not seqs_list:
+        return
+    with open(out_path, "w") as f:
+        for cid, seq, *_ in seqs_list:
+            f.write(f">{cid}\n{seq}\n")
 
 
-def _save_tsv(rows, path):
-    if not rows: return
-    headers = list(rows[0].keys())
-    with open(path,"w") as f:
-        f.write("\t".join(headers)+"\n")
-        for row in rows:
-            f.write("\t".join(str(row.get(h,"")) for h in headers)+"\n")
+def _save_tsv(row: dict, path: Path) -> None:
+    headers = ["sample", "complete", "hq", "mq", "lq",
+               "best_length", "best_quality"]
+    rows = {}
+    if path.exists():
+        with open(path) as f:
+            f.readline()
+            for line in f:
+                cols = line.rstrip("\n").split("\t")
+                if cols:
+                    rows[cols[0]] = cols
+    rows[row["sample"]] = [str(row.get(h, "")) for h in headers]
+    with open(path, "w") as f:
+        f.write("\t".join(headers) + "\n")
+        for r in rows.values():
+            f.write("\t".join(r) + "\n")
