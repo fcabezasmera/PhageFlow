@@ -64,27 +64,26 @@ conda install -c bioconda -c conda-forge \
     checkv pharokka abricate \
     ncbi-datasets-cli kraken2 -y
 
-# geNomad (separate environment recommended)
+# geNomad (separate environment)
 conda create -n genomad -c conda-forge -c bioconda genomad -y
 
 # Phold (separate environment)
-conda create -n pholdENV -c conda-forge -c bioconda phold -y
+conda create -n phold -c conda-forge -c bioconda phold -y
 
 # BACPHLIP (separate environment)
-conda create -n bacphlip_env -c conda-forge -c bioconda bacphlip -y
+conda create -n bacphlip -c conda-forge -c bioconda bacphlip -y
 ```
 
 ### 4. Register the PhageFlow CLI in every environment
 
-Modules that require a separate environment (geNomad, Phold, BACPHLIP) still
-need access to the `phageflow` command. Register it once per environment
-without touching its dependencies:
+Modules that require a separate environment still need access to the `phageflow`
+command. Register it once per environment without touching its dependencies:
 
 ```bash
-conda activate genomad    && pip install -e . --no-deps -q
-conda activate pholdENV   && pip install -e . --no-deps -q
-conda activate bacphlip_env && pip install -e . --no-deps -q
-conda activate phageflow  # return to main env
+conda activate genomad  && pip install -e . --no-deps -q
+conda activate phold    && pip install -e . --no-deps -q
+conda activate bacphlip && pip install -e . --no-deps -q
+conda activate phageflow
 ```
 
 ### 5. Set up databases
@@ -101,10 +100,11 @@ conda activate genomad
 genomad download-database databases/genomad_db
 
 # Phold
-conda activate pholdENV
+conda activate phold
 phold install -d databases/phold_db
 
 # (Optional) Kraken2 — only for auto host detection
+conda activate phageflow
 kraken2-build --download-library bacteria --db databases/k2_db
 kraken2-build --build --db databases/k2_db
 
@@ -128,7 +128,7 @@ phageflow samples  # creates config/samples.tsv
 
 # Edit samples.tsv with your data, then run each module.
 # Stay in the phageflow environment throughout — use conda run for
-# modules that require a separate environment (viral-id, annotate, lifecycle).
+# modules that require a separate environment.
 
 conda activate phageflow
 
@@ -155,7 +155,7 @@ phageflow annotate  --sample-id s1 \
 phageflow safety    --sample-id s1 \
     --genome results/05_quality/annotation_ready/s1_HQ.fasta
 
-conda run -n bacphlip_env phageflow lifecycle --sample-id s1 \
+conda run -n bacphlip phageflow lifecycle --sample-id s1 \
     --genome results/05_quality/annotation_ready/s1_HQ.fasta
 ```
 
@@ -170,12 +170,12 @@ Edit `config/config.yaml` before running:
 
 ```yaml
 project: PhageFlow
-mode: purified_phage      # only mode currently supported
+mode: purified_phage
 
 samples_file: config/samples.tsv
 
-threads:   22             # CPU threads
-memory_gb: 64             # RAM limit (GB)
+threads:   22
+memory_gb: 64
 
 databases:
   checkv:   databases/checkv_db/checkv-db-v1.5
@@ -185,13 +185,19 @@ databases:
   kraken2:  databases/k2_db    # only needed for auto host detection
 
 assembly:
-  kmers: "21,33,55,77,99,127"   # SPAdes k-mer list
+  kmers: "21,33,55,77,99,127"
 
 genomad:
-  min_score: 0.7                 # geNomad virus score threshold
+  min_score: 0.7
 
 checkv:
-  min_completeness: 50           # minimum % completeness for HQ selection
+  min_completeness: 50
+
+envs:
+  main:      phageflow
+  genomad:   genomad
+  phold:     phold
+  lifecycle: bacphlip
 ```
 
 Override threads at runtime with `-t / --threads`:
@@ -221,21 +227,22 @@ s2	/path/to/s2_R1.fastq.gz	/path/to/s2_R2.fastq.gz
 ## Environment setup
 
 PhageFlow uses a main environment (`phageflow`) plus three tool-specific
-environments. You only need to activate `phageflow`; all other environments
-are invoked via `conda run`.
+environments. You only need to activate `phageflow`; all others are invoked
+transparently via `conda run`.
 
-| Environment    | Tools           | Used by modules    |
-|----------------|-----------------|--------------------|
-| `phageflow`    | all core tools  | 01–03, 05–07       |
-| `genomad`      | geNomad         | 04 viral-id        |
-| `pholdENV`     | Phold           | 06 annotate        |
-| `bacphlip_env` | BACPHLIP        | 08 lifecycle       |
+| Environment | Tools    | Used by modules    |
+|-------------|----------|--------------------|
+| `phageflow` | all core tools | 01–03, 05–07 |
+| `genomad`   | geNomad  | 04 viral-id        |
+| `phold`     | Phold    | 06 annotate        |
+| `bacphlip`  | BACPHLIP | 08 lifecycle       |
+
+**One-time setup** — register the CLI in each environment:
 
 ```bash
-# One-time setup: register CLI in each env
-conda activate genomad      && pip install -e . --no-deps -q
-conda activate pholdENV     && pip install -e . --no-deps -q
-conda activate bacphlip_env && pip install -e . --no-deps -q
+conda activate genomad  && pip install -e . --no-deps -q
+conda activate phold    && pip install -e . --no-deps -q
+conda activate bacphlip && pip install -e . --no-deps -q
 conda activate phageflow
 ```
 
@@ -270,7 +277,7 @@ phageflow qc \
 
 ### 02 host-removal
 
-**Host read removal** using bwa-mem2 (when a reference is available) or Kraken2 (auto-detection mode).
+**Host read removal** using bwa-mem2 or Kraken2.
 
 ```bash
 # Mode 1: local FASTA
@@ -298,7 +305,7 @@ Keeps unclassified reads (novel phage) + Viruses (taxid 10239).
 
 ### 03 assembly
 
-**De novo assembly** with metaSPAdes + MEGAHIT, followed by 100% identity dereplication with cd-hit-est.
+**De novo assembly** with metaSPAdes + MEGAHIT + cd-hit-est dereplication.
 
 ```bash
 phageflow assembly \
@@ -306,8 +313,6 @@ phageflow assembly \
   --r1 results/02_host_removal/s1_R1.fastq.gz \
   --r2 results/02_host_removal/s1_R2.fastq.gz
 ```
-
-**Tool configuration:**
 
 | Tool | Key flags | Rationale |
 |---|---|---|
@@ -323,16 +328,14 @@ phageflow assembly \
 
 **Viral identification** with geNomad.
 
-> **Requires geNomad environment** — use `conda run` (no need to switch envs):
-
 ```bash
 conda run -n genomad phageflow viral-id \
   --sample-id s1 \
   --contigs results/03_assembly/combined/s1_contigs_nr.fasta
 ```
 
-geNomad classifies contigs as virus / plasmid / chromosome and detects integrated proviruses.
-Default `--min-score 0.7` (configurable in `config.yaml`).
+geNomad classifies contigs as virus / plasmid / chromosome and detects integrated
+proviruses. Default `--min-score 0.7` (configurable in `config.yaml`).
 
 **Outputs:** `results/04_viral_id/{sample}_virus.fna`, `reports/04_viral_id/genomad_summary.tsv`
 
@@ -348,8 +351,6 @@ phageflow quality \
   --virus-fna results/04_viral_id/s1_virus.fna
 ```
 
-**Quality tiers (MIUVIG standard):**
-
 | Tier | Completeness | Destination |
 |---|---|---|
 | Complete / High-quality | ≥ configured threshold | `annotation_ready/` |
@@ -363,9 +364,7 @@ phageflow quality \
 
 ### 06 annotate
 
-**Structural and functional annotation** using Pharokka (sequence homology) + Phold (structure-based).
-
-> **Phold requires its own environment** — invoked automatically via `conda run`:
+**Structural and functional annotation** using Pharokka + Phold.
 
 ```bash
 phageflow annotate \
@@ -373,21 +372,19 @@ phageflow annotate \
   --genome results/05_quality/annotation_ready/s1_HQ.fasta
 ```
 
-**Workflow:**
-
-1. **Pharokka** — PHANOTATE gene calling + PHROG database annotation + genome reorientation (`--dnaapler all`).
-2. **Phold** — ProstT5 protein language model + Foldseek structural alignment to PHROGs; upgrades hypothetical proteins with functional predictions.
+1. **Pharokka** — PHANOTATE gene calling + PHROG database + genome reorientation (`--dnaapler all`).
+2. **Phold** — ProstT5 + Foldseek structural alignment; upgrades hypothetical proteins.
 
 **Outputs:**
-- `results/06_annotation/{sample}/pharokka/{sample}.gbk` — GenBank
-- `results/06_annotation/{sample}/pharokka/{sample}.gff` — GFF3
-- `results/06_annotation/{sample}/phold/{sample}_phold.gbk` — enhanced GenBank
+- `results/06_annotation/{sample}/pharokka/{sample}.gbk`
+- `results/06_annotation/{sample}/pharokka/{sample}.gff`
+- `results/06_annotation/{sample}/phold/{sample}_phold.gbk`
 
 ---
 
 ### 07 safety
 
-**Biosafety screening** for phage therapy candidacy assessment.
+**Biosafety screening** for phage therapy candidacy.
 
 ```bash
 phageflow safety \
@@ -395,15 +392,11 @@ phageflow safety \
   --genome results/05_quality/annotation_ready/s1_HQ.fasta
 ```
 
-**Checks:**
-
 | Screen | Tool | Database | Threshold |
 |---|---|---|---|
 | Antimicrobial resistance | abricate | CARD | 80% id / 80% cov |
 | Virulence factors | abricate | VFDB | 80% id / 80% cov |
 | Integrase / lysogeny | Pharokka annotation | PHROG categories | — |
-
-**Safety verdict:**
 
 | Verdict | Condition |
 |---|---|
@@ -411,7 +404,7 @@ phageflow safety \
 | ⚠ CAUTION | Integrase or VF detected — expert review required |
 | ✗ FAIL | ARG detected — exclude from therapeutic use |
 
-> Run `phageflow annotate` first for integrase detection (requires Pharokka output).
+> Run `phageflow annotate` first for integrase detection.
 
 **Outputs:** `reports/07_safety/safety_summary.tsv`, `{sample}_safety_details.tsv`
 
@@ -421,17 +414,13 @@ phageflow safety \
 
 **Lifecycle prediction** (virulent / temperate) with BACPHLIP.
 
-> **Requires BACPHLIP environment** — use `conda run` (no need to switch envs):
-
 ```bash
-conda run -n bacphlip_env phageflow lifecycle \
+conda run -n bacphlip phageflow lifecycle \
   --sample-id s1 \
   --genome results/05_quality/annotation_ready/s1_HQ.fasta
 ```
 
-BACPHLIP uses a random forest classifier trained on 62 lifestyle-associated HMM profiles (integrases, CI repressors, holins, endolysins).
-
-**Interpretation:**
+BACPHLIP uses a random forest classifier trained on 62 lifestyle-associated HMM profiles.
 
 | Score | Prediction |
 |---|---|
@@ -439,7 +428,7 @@ BACPHLIP uses a random forest classifier trained on 62 lifestyle-associated HMM 
 | Temperate ≥ 0.9 | Confident lysogen — requires expert review |
 | Neither ≥ 0.9 | Ambiguous — manual annotation review recommended |
 
-PhageFlow automatically cross-checks the result against integrase genes detected by the safety module and warns on conflicts.
+PhageFlow cross-checks the result against integrase genes from the safety module.
 
 **Outputs:** `results/08_lifecycle/{sample}.fasta.bacphlip`, `reports/08_lifecycle/lifecycle_summary.tsv`
 
@@ -470,7 +459,7 @@ results/
 reports/
 ├── 01_qc/                  fastp JSON, FastQC, MultiQC HTML
 ├── 02_host_removal/        host_removal_summary.tsv
-├── 03_assembly/            assembly_summary.tsv, assembler logs
+├── 03_assembly/            assembly_summary.tsv
 ├── 04_viral_id/            genomad_summary.tsv
 ├── 05_quality/             checkv_summary.tsv, genome_selection.tsv
 ├── 06_annotation/          annotation_summary.tsv
@@ -481,9 +470,6 @@ reports/
 ---
 
 ## Running all samples in a loop
-
-PhageFlow processes one sample at a time by design. Use a shell loop for batch processing.
-Stay in `phageflow` throughout — `conda run` handles tool-specific environments.
 
 ```bash
 #!/usr/bin/env bash
@@ -499,8 +485,8 @@ for sample in "${SAMPLES[@]}"; do
     echo "=== Processing: $sample ==="
 
     phageflow qc -c "$CONFIG" --sample-id "$sample" \
-        --r1 "$(grep "^${sample}" config/samples.tsv | cut -f2)" \
-        --r2 "$(grep "^${sample}" config/samples.tsv | cut -f3)"
+        --r1 "$(awk -v s="$sample" '$1==s{print $2}' config/samples.tsv)" \
+        --r2 "$(awk -v s="$sample" '$1==s{print $3}' config/samples.tsv)"
 
     phageflow host-removal -c "$CONFIG" --sample-id "$sample" \
         --r1 "results/01_qc/${sample}_R1.fastq.gz" \
@@ -519,7 +505,7 @@ for sample in "${SAMPLES[@]}"; do
 
     GENOME="results/05_quality/annotation_ready/${sample}_HQ.fasta"
     if [[ ! -f "$GENOME" ]]; then
-        echo "  No HQ genome for $sample — skipping annotation"
+        echo "  No HQ genome for $sample — skipping downstream modules"
         continue
     fi
 
@@ -527,7 +513,7 @@ for sample in "${SAMPLES[@]}"; do
 
     phageflow safety -c "$CONFIG" --sample-id "$sample" --genome "$GENOME"
 
-    conda run -n bacphlip_env phageflow lifecycle -c "$CONFIG" \
+    conda run -n bacphlip phageflow lifecycle -c "$CONFIG" \
         --sample-id "$sample" --genome "$GENOME"
 
 done

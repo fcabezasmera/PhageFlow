@@ -1,7 +1,5 @@
 project: PhageFlow
-version: "0.1.0"
-
-# Execution mode: purified_phage | virome_reads | virome_contigs
+version: "3.0.0"
 mode: purified_phage
 
 samples_file: config/samples.tsv
@@ -14,17 +12,17 @@ databases:
   pharokka: databases/pharokka_db
   genomad:  databases/genomad_db
   phold:    databases/phold_db
-  # kraken2: /path/to/kraken2_db   # required for auto host detection
+  # kraken2: /path/to/kraken2_db
 
 envs:
   main:      phageflow
   genomad:   genomad
-  phold:     pholdENV
-  lifecycle: bacphlip_env
+  phold:     phold
+  lifecycle: bacphlip
 
 assembly:
   kmers:      "21,33,55,77,99,127"
-  min_length: 500
+  min_length: 200
 
 genomad:
   min_score:     0.7

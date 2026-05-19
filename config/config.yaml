@@ -23,12 +23,12 @@ databases:
 envs:
   main:      phageflow
   genomad:   genomad
-  phold:     pholdENV
-  lifecycle: bacphlip_env
+  phold:     phold
+  lifecycle: bacphlip
 
 assembly:
   kmers:      "21,33,55,77,99,127"
-  min_length: 200   # bp — applied to SPAdes (post-filter) and MEGAHIT
+  min_length: 200
 
 genomad:
   min_score: 0.7
