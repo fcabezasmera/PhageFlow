@@ -25,24 +25,20 @@ SPAdes v3.15+ (Bankevich et al. 2012, Journal of Computational Biology):
         contigs <200 bp cannot encode a full gene and are likely assembly
         artefacts at high coverage. 200 bp is more permissive than the
         500 bp default — appropriate for phage where compact genomes make
-        every contig relevant. SPAdes does not have a built-in --min-contig-len
-        flag, so filtering is applied post-hoc with a simple FASTA parser.
+        every contig relevant.
 
     Note: --cov-cutoff auto is INCOMPATIBLE with --meta (SPAdes ≥3.15)
     Note: contigs.fasta used (NOT scaffolds.fasta) — scaffolds introduce
-          artificial N-gaps that break ORF prediction in Pharokka/Phold
-          (geNomad, CheckV, Pharokka all use contigs as standard input)
+          artificial N-gaps that break ORF prediction in Pharokka/Phold.
 
 MEGAHIT v1.2+ (Li et al. 2015, Bioinformatics):
     --k-list 21,29,39,59,79,99,119,141
         Progressive k-mer list — covers a wider range than SPAdes default,
         recovering contigs missed at intermediate k values.
-        Li et al. 2015: recommended for PE150 metagenomic data.
 
     --min-count 2
         Minimum solid k-mer multiplicity — removes sequencing errors
         without losing low-coverage genuine phage k-mers.
-        Li et al. 2016 (Methods): min-count=2 optimal for >50× coverage.
 
     --no-mercy
         Disable mercy k-mers (used to recover low-coverage tips).
@@ -51,9 +47,6 @@ MEGAHIT v1.2+ (Li et al. 2015, Bioinformatics):
 
     --min-contig-len 200
         Lowered from 500 to 200 bp — consistent with the SPAdes post-filter.
-        Phage genomes are compact; a 200–499 bp contig can encode a partial
-        or small CDS (e.g. holin, spanin subunit) with functional relevance.
-        CheckV and geNomad handle short contigs gracefully.
 
 cd-hit-est (Fu et al. 2012, Bioinformatics):
     -c 1.00 (100% identity): removes exact duplicates between assemblers
@@ -81,8 +74,9 @@ STEP  = "03_assembly"
 TOOLS = ["spades.py", "megahit", "cd-hit-est"]
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
-_N50_WARN         = 5_000  # NR N50 < 5 kb → fragmented assembly
-_MAX_CONTIGS_WARN = 100    # NR contigs > 100 → unusual for purified phage
+_N50_WARN         = 5_000   # NR N50 < 5 kb → fragmented assembly
+_MAX_CONTIGS_WARN = 100     # NR contigs > 100 → unusual for purified phage
+_MIN_CONTIGS      = 1       # fewer NR contigs → assembly failure risk
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -149,6 +143,7 @@ def run(
 
     # ── Metrics, display, save ─────────────────────────────────────────────────
     stats = _collect_stats(sp_fa, mh_fa, nr_fa)
+    _validate_output(sample_id, nr_fa, stats)
     _save_tsv(sample_id, sp_fa, mh_fa, nr_fa, rpt_dir / "assembly_summary.tsv")
     _print_summary_table(sample_id, stats)
     _check_warnings(stats)
@@ -181,38 +176,30 @@ def _run_spades(
 
     if sp_fa.exists() and sp_fa.stat().st_size > 0 and not force:
         log_info("  [SPAdes] already exists — skipping")
-    else:
-        try:
-            run_silent([
-                "spades.py",
-                "--pe1-1", str(r1), "--pe1-2", str(r2),
-                "--meta",
-                "--only-assembler",
-                "-k",        cfg.assembly.kmers,
-                "--threads", str(cfg.threads),
-                "--memory",  str(cfg.memory_gb),
-                "-o",        str(sp_dir),
-            ], log_file=rpt_dir / f"{sample_id}_spades.log")
-        except Exception as e:
-            log_warn(f"  [SPAdes] warning: {e}")
+        return sp_fa
 
-        if sp_raw.exists() and sp_raw.stat().st_size > 0:
-            n_raw, n_kept = _filter_fasta(sp_raw, sp_fa, cfg.assembly.min_length)
-            log_info(
-                f"  [SPAdes] length filter ≥{cfg.assembly.min_length}bp: "
-                f"{n_raw} → {n_kept} contigs  (discarded {n_raw - n_kept})"
-            )
-        else:
-            log_warn("  [SPAdes] no raw output to filter")
+    try:
+        run_silent([
+            "spades.py",
+            "--pe1-1", str(r1), "--pe1-2", str(r2),
+            "--meta",
+            "--only-assembler",
+            "-k",        cfg.assembly.kmers,
+            "--threads", str(cfg.threads),
+            "--memory",  str(cfg.memory_gb),
+            "-o",        str(sp_dir),
+        ], log_file=rpt_dir / f"{sample_id}_spades.log")
+    except Exception as e:
+        log_warn(f"  [SPAdes] warning: {e}")
 
-    if sp_fa.exists() and sp_fa.stat().st_size > 0:
-        s = fasta_stats(sp_fa)
+    if sp_raw.exists() and sp_raw.stat().st_size > 0:
+        n_raw, n_kept = _filter_fasta(sp_raw, sp_fa, cfg.assembly.min_length)
         log_ok(
-            f"  [SPAdes] {s['n']} contigs | "
-            f"largest={s['largest_bp']}bp | N50={s['n50']}bp | total={s['total_bp']}bp"
+            f"  [SPAdes] length filter ≥{cfg.assembly.min_length}bp: "
+            f"{n_raw} → {n_kept} contigs  (discarded {n_raw - n_kept})"
         )
     else:
-        log_warn("  [SPAdes] no output after filtering")
+        log_warn("  [SPAdes] no assembly output — check log")
 
     return sp_fa
 
@@ -232,32 +219,26 @@ def _run_megahit(
 
     if mh_fa.exists() and mh_fa.stat().st_size > 0 and not force:
         log_info("  [MEGAHIT] already exists — skipping")
-    else:
-        if mh_dir.exists():
-            shutil.rmtree(mh_dir)
-        mh_dir.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            run_silent([
-                "megahit",
-                "-1", str(r1), "-2", str(r2),
-                "-o",               str(mh_dir),
-                "--k-list",         "21,29,39,59,79,99,119,141",
-                "--min-count",      "2",
-                "--no-mercy",
-                "--min-contig-len", str(cfg.assembly.min_length),
-                "-t",               str(cfg.threads),
-            ], log_file=rpt_dir / f"{sample_id}_megahit.log")
-        except Exception as e:
-            log_warn(f"  [MEGAHIT] warning: {e}")
+        return mh_fa
 
-    if mh_fa.exists() and mh_fa.stat().st_size > 0:
-        s = fasta_stats(mh_fa)
-        log_ok(
-            f"  [MEGAHIT] {s['n']} contigs | "
-            f"largest={s['largest_bp']}bp | N50={s['n50']}bp | total={s['total_bp']}bp"
-        )
-    else:
-        log_warn("  [MEGAHIT] no output")
+    if mh_dir.exists():
+        shutil.rmtree(mh_dir)
+    mh_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        run_silent([
+            "megahit",
+            "-1", str(r1), "-2", str(r2),
+            "-o",               str(mh_dir),
+            "--k-list",         "21,29,39,59,79,99,119,141",
+            "--min-count",      "2",
+            "--no-mercy",
+            "--min-contig-len", str(cfg.assembly.min_length),
+            "-t",               str(cfg.threads),
+        ], log_file=rpt_dir / f"{sample_id}_megahit.log")
+        log_ok("  [MEGAHIT] assembly complete")
+    except Exception as e:
+        log_warn(f"  [MEGAHIT] warning: {e}")
 
     return mh_fa
 
@@ -276,7 +257,7 @@ def _run_cdhit(
     tmp_fa = out_dir / "combined" / f"{sample_id}_all_tmp.fasta"
 
     if nr_fa.exists() and nr_fa.stat().st_size > 0 and not force:
-        log_info("  [cd-hit-est] already exists — skipping")
+        log_info("  \\[cd-hit-est] already exists — skipping")
         return nr_fa
 
     n_sp = n_mh = 0
@@ -299,8 +280,11 @@ def _run_cdhit(
                         out.write(line)
 
     n_input = n_sp + n_mh
-    if n_input > 0:
-        log_info(f"  [cd-hit-est] {n_input} contigs → dereplicating at 100% identity...")
+    if n_input == 0:
+        log_warn("  [cd-hit-est] no contigs from either assembler")
+        return nr_fa
+
+    try:
         run_silent([
             "cd-hit-est",
             "-i", str(tmp_fa), "-o", str(nr_fa),
@@ -309,22 +293,32 @@ def _run_cdhit(
             "-T", str(cfg.threads),
             "-M", str(cfg.memory_gb * 1000),
         ], log_file=rpt_dir / f"{sample_id}_cdhit.log")
+        log_ok("  \\[cd-hit-est] dereplication complete")
+    except Exception as e:
+        log_warn(f"  \\[cd-hit-est] warning: {e}")
+    finally:
         tmp_fa.unlink(missing_ok=True)
         Path(str(nr_fa) + ".clstr").unlink(missing_ok=True)
 
-        s      = fasta_stats(nr_fa)
-        n_nr   = s["n"]
-        redund = n_input - n_nr
-        pct    = f"{redund / n_input * 100:.1f}%"
-        log_ok(
-            f"  [cd-hit-est] {n_input} → {n_nr} contigs "
-            f"| −{redund} redundant ({pct}) "
-            f"| largest={s['largest_bp']}bp"
+    return nr_fa
+
+
+# ── Validation ────────────────────────────────────────────────────────────────
+
+def _validate_output(sample_id: str, nr_fa: Path, stats: dict) -> None:
+    """Warn if the NR FASTA is missing or empty after assembly."""
+    if not nr_fa.exists() or nr_fa.stat().st_size == 0:
+        log_warn(f"  validate · NR contigs file missing or empty: {nr_fa}")
+        return
+
+    n = stats.get("nr_n", 0)
+    if n < _MIN_CONTIGS:
+        log_warn(
+            f"  validate · 0 NR contigs assembled — "
+            "check read quality and host removal step."
         )
     else:
-        log_warn("  [cd-hit-est] no contigs from either assembler")
-
-    return nr_fa
+        log_ok(f"  validate · {n} NR contigs — OK")
 
 
 # ── Stats collection ──────────────────────────────────────────────────────────
@@ -373,33 +367,28 @@ def _filter_fasta(src: Path, dst: Path, min_len: int) -> tuple[int, int]:
 
     Returns (n_total, n_kept).
     """
-    n_total = n_kept = 0
-    current_header = ""
-    current_seq: List[str] = []
+    seqs: List[tuple[str, str]] = []
+    header = seq = ""
 
-    def _flush(out):
-        nonlocal n_kept
-        seq = "".join(current_seq)
-        if len(seq) >= min_len:
-            out.write(current_header + "\n")
-            out.write(seq + "\n")
-            n_kept += 1
-
-    with open(src) as f_in, open(dst, "w") as f_out:
-        for line in f_in:
+    with open(src) as f:
+        for line in f:
             line = line.rstrip()
             if line.startswith(">"):
-                if current_header:
-                    _flush(f_out)
-                current_header = line
-                current_seq = []
-                n_total += 1
+                if header:
+                    seqs.append((header, seq))
+                header, seq = line, ""
             else:
-                current_seq.append(line)
-        if current_header:
-            _flush(f_out)
+                seq += line
+    if header:
+        seqs.append((header, seq))
 
-    return n_total, n_kept
+    kept = [(h, s) for h, s in seqs if len(s) >= min_len]
+
+    with open(dst, "w") as f:
+        for h, s in kept:
+            f.write(h + "\n" + s + "\n")
+
+    return len(seqs), len(kept)
 
 
 # ── Rich display helpers ──────────────────────────────────────────────────────
@@ -407,7 +396,7 @@ def _filter_fasta(src: Path, dst: Path, min_len: int) -> tuple[int, int]:
 def _color_rate(val_str: str, good: float, warn: float) -> str:
     """Return Rich-colored string based on numeric thresholds."""
     try:
-        v = float(val_str.rstrip("%"))
+        v = float(str(val_str).rstrip("%"))
         if v >= good: return f"[bold green]{val_str}[/bold green]"
         if v >= warn: return f"[bold yellow]{val_str}[/bold yellow]"
         return f"[bold red]{val_str}[/bold red]"
@@ -416,8 +405,8 @@ def _color_rate(val_str: str, good: float, warn: float) -> str:
 
 
 def _fmt(val, unit: str = "") -> str:
-    """Format metric value; dim 'N/A' or zero entries."""
-    if val in ("N/A", "", None, 0):
+    """Format metric value; dim 'N/A' or missing entries."""
+    if val in ("N/A", "", None):
         return "[dim]N/A[/dim]"
     return f"{val}{unit}"
 
