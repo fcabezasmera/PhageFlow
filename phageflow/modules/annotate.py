@@ -101,7 +101,7 @@ def run(
     cdir    = out_dir / candidate_id
     mkdirs(cdir, rpt_dir)
 
-    log_step(f"Module 06 — annotation [{candidate_id}] · {cfg.threads} threads")
+    log_step(f"Module 06 — annotation [{candidate_id}]")
 
     if not genome.exists():
         log_error(f"  Genome not found: {genome}")

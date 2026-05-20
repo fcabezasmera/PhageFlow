@@ -168,7 +168,7 @@ def run(
     tmp_dir   = out_dir / "tmp"
     mkdirs(out_dir, rpt_dir, phage_dir, prov_dir, draft_dir, tmp_dir)
 
-    log_step(f"Module 05 — quality [{sample_id}] · {cfg.threads} threads")
+    log_step(f"Module 05 — quality [{sample_id}]")
 
     if not virus_fna.exists():
         log_error(f"  Virus FASTA not found: {virus_fna}")
