@@ -1,21 +1,27 @@
 """PhageFlow Module 04 — Viral identification with geNomad.
 
 Tool:
-    geNomad (Camargo et al. 2023, Nature Biotechnology):
+    geNomad v1.8+ (Camargo et al. 2023, Nature Biotechnology):
         End-to-end classification of contigs as virus / plasmid / chromosome.
         Detects integrated proviruses and assigns viral taxonomy.
 
-        --splits 8         : splits input for parallel processing.
+        --splits 8         : splits input for parallel processing;
+                             each split processed independently then merged.
         --min-score 0.7    : virus score threshold (default); configurable via config.yaml.
-        --cleanup          : removes large intermediate files after run.
+                             Camargo et al. 2023: 0.7 yields ~97% precision on diverse viruses.
+        --min-hallmarks 0  : minimum viral hallmark genes required for classification;
+                             configurable via config.yaml (0 = score-only mode).
+        --cleanup          : removes large intermediate files after run,
+                             retaining only summary and FASTA outputs.
+
+    Taxonomy:
+        geNomad assigns ICTV-aligned taxonomy: Realm > Kingdom > Phylum >
+        Class > Order > Family > Genus.  The most specific resolved level
+        is reported as best_taxon (unclassified if no assignment).
 
 Input  : results/03_assembly/combined/{sample}_contigs_nr.fasta
 Output : results/04_viral_id/{sample}_virus.fna  ← CheckV input
          reports/04_viral_id/genomad_summary.tsv
-
-Activation note:
-    geNomad requires its own conda environment.
-    Use: conda run -n genomad phageflow viral-id ...
 """
 
 from __future__ import annotations
@@ -38,6 +44,8 @@ TOOLS = ["genomad"]
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 _VIRAL_FRACTION_WARN = 0.05   # < 5% viral contigs → unusual for purified phage
+_SCORE_GOOD          = 0.90   # virus score: confident viral classification
+_SCORE_WARN          = 0.70   # virus score: acceptable but borderline
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -79,9 +87,12 @@ def run(
         raise FileNotFoundError(f"[{sample_id}] contigs not found: {contigs}")
 
     s = fasta_stats(contigs)
-    _print_input_table(contigs, s)
-    log_info(f"  geNomad min-score : {cfg.genomad.min_score}  (Camargo et al. 2023)")
-    log_info("  Classifying       : virus / plasmid / chromosome + provirus detection")
+    _print_input_table(sample_id, contigs, s)
+    log_info(
+        f"  geNomad end-to-end  (Camargo et al. 2023)  |  "
+        f"min-score={cfg.genomad.min_score}  min-virus-hallmarks={cfg.genomad.min_hallmarks}"
+    )
+    log_info("  Classifying : virus / plasmid / chromosome + provirus")
 
     # ── geNomad working paths (fixed naming convention) ───────────────────────
     sdir   = out_dir / sample_id
@@ -107,13 +118,16 @@ def run(
         progress.advance(task)
 
         # 2/2 — parse results + copy output
-        progress.update(task, description="[2/2] geNomad  — parsing results")
-        row = _parse_genomad_output(sample_id, contigs, sdir, prefix, v_fna, v_tsv)
+        progress.update(task, description="[2/2] geNomad  — parsing & copying results")
+        row = _parse_genomad_output(sample_id, s["n"], sdir, prefix, v_fna, v_tsv)
         if v_fna.exists() and v_fna.stat().st_size > 0:
             shutil.copy(v_fna, virus_fna)
             log_ok("  \\[geNomad] results parsed")
         else:
-            log_warn("  \\[geNomad] virus FASTA not found — check log in reports/04_viral_id/")
+            log_warn(
+                "  \\[geNomad] virus FASTA not found — "
+                "check log in reports/04_viral_id/"
+            )
         progress.advance(task)
 
     # ── Metrics, display, save ─────────────────────────────────────────────────
@@ -127,7 +141,7 @@ def run(
     log_ok(f"  Virus FASTA : {virus_fna}")
     log_info(
         f"  Next: phageflow quality --sample-id {sample_id} "
-        f"--virus-fna {virus_fna}  (activate phageflow env)"
+        f"--virus-fna {virus_fna}"
     )
     return virus_fna
 
@@ -148,28 +162,34 @@ def _run_genomad(
     v_fna  = sdir / f"{prefix}_summary" / f"{prefix}_virus.fna"
 
     if v_fna.exists() and v_fna.stat().st_size > 0 and not force:
-        log_info("  \\[geNomad] already processed — skipping")
+        log_info("  \\[geNomad] already processed — skipping  (--force to re-run)")
         return
 
     mkdirs(sdir)
-    try:
-        run_silent([
-            "genomad", "end-to-end",
-            "--cleanup",
-            "--splits",    "8",
-            "--min-score", str(cfg.genomad.min_score),
-            "--threads",   str(cfg.threads),
-            str(contigs), str(sdir), str(db),
-        ], log_file=rpt_dir / f"{sample_id}_genomad.log")
+    run_silent([
+        "genomad", "end-to-end",
+        "--cleanup",
+        "--splits",        "8",
+        "--min-score",     str(cfg.genomad.min_score),
+        "--min-virus-hallmarks", str(cfg.genomad.min_hallmarks),
+        "--threads",       str(cfg.threads),
+        str(contigs), str(sdir), str(db),
+    ], log_file=rpt_dir / f"{sample_id}_genomad.log", check=False)
+
+    # geNomad exits with code 2 in some valid runs; verify by output file
+    if v_fna.exists() and v_fna.stat().st_size > 0:
         log_ok("  \\[geNomad] classification complete")
-    except Exception as e:
-        log_warn(f"  \\[geNomad] warning: {e}")
+    else:
+        log_warn(
+            "  \\[geNomad] no virus FASTA produced — "
+            f"check {rpt_dir / f'{sample_id}_genomad.log'}"
+        )
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
 def _validate_output(sample_id: str, virus_fna: Path, row: dict) -> None:
-    """Warn if no viral contigs were identified."""
+    """Warn if no viral contigs were identified, confirm OK otherwise."""
     if not virus_fna.exists() or virus_fna.stat().st_size == 0:
         log_warn(f"  validate · virus FASTA missing or empty: {virus_fna}")
         return
@@ -177,8 +197,8 @@ def _validate_output(sample_id: str, virus_fna: Path, row: dict) -> None:
     n = row.get("viral_ctg", 0)
     if n == 0:
         log_warn(
-            f"  validate · 0 viral contigs identified — "
-            "check geNomad log or lower --min-score in config.yaml"
+            "  validate · 0 viral contigs identified — "
+            "lower genomad.min_score in config.yaml or check assembly output."
         )
     else:
         log_ok(f"  validate · {n} viral contig(s) identified — OK")
@@ -188,25 +208,33 @@ def _validate_output(sample_id: str, virus_fna: Path, row: dict) -> None:
 
 def _parse_genomad_output(
     sample_id: str,
-    fa:        Path,
+    n_input:   int,
     sdir:      Path,
     prefix:    str,
     v_fna:     Path,
     v_tsv:     Path,
 ) -> dict:
-    """Parse geNomad output into a summary dict."""
-    n_input  = fasta_stats(fa)["n"]
-    n_viral  = fasta_stats(v_fna)["n"]        if v_fna.exists() else 0
-    viral_bp = fasta_stats(v_fna)["total_bp"] if v_fna.exists() else 0
+    """
+    Parse geNomad output into a summary dict.
 
-    p_tsv  = sdir / f"{prefix}_summary"          / f"{prefix}_plasmid_summary.tsv"
+    Receives n_input from the already-computed fasta_stats to avoid
+    redundant I/O on the (potentially large) contigs FASTA.
+    """
+    # Viral FASTA stats (single read, results reused below)
+    v_stats  = fasta_stats(v_fna) if v_fna.exists() else {"n": 0, "total_bp": 0}
+    n_viral  = v_stats["n"]
+    viral_bp = v_stats["total_bp"]
+
+    # Plasmid / provirus counts
+    p_tsv  = sdir / f"{prefix}_summary"         / f"{prefix}_plasmid_summary.tsv"
     pr_tsv = sdir / f"{prefix}_find_proviruses"  / f"{prefix}_provirus.tsv"
-
     n_plas = _count_tsv_rows(p_tsv)
     n_prov = _count_tsv_rows(pr_tsv)
 
-    best_fam  = "unclassified"
+    # Best virus score + most specific taxonomy from virus_summary.tsv
+    best_taxon = "unclassified"
     best_score = 0.0
+
     if v_tsv.exists():
         try:
             with open(v_tsv) as f:
@@ -218,14 +246,19 @@ def _parse_genomad_output(
                         continue
                     try:
                         score = float(row[col.get("virus_score", 6)])
-                        if score > best_score:
-                            best_score = score
-                            tax   = row[col.get("taxonomy", 10)] if len(row) > col.get("taxonomy", 10) else ""
-                            parts = [p.strip() for p in tax.split(";") if p.strip()]
-                            if parts:
-                                best_fam = parts[-1]
                     except (ValueError, IndexError):
-                        pass
+                        continue
+                    if score > best_score:
+                        best_score = score
+                        # Extract the most specific non-empty taxonomy level
+                        tax_idx = col.get("taxonomy", 10)
+                        if len(row) > tax_idx:
+                            levels = [
+                                lvl.strip()
+                                for lvl in row[tax_idx].split(";")
+                                if lvl.strip() and lvl.strip().lower() != "unclassified"
+                            ]
+                            best_taxon = levels[-1] if levels else "unclassified"
         except Exception:
             pass
 
@@ -236,7 +269,7 @@ def _parse_genomad_output(
         "viral_bp":    viral_bp,
         "plasmid":     n_plas,
         "provirus":    n_prov,
-        "best_family": best_fam,
+        "best_taxon":  best_taxon,
         "best_score":  round(best_score, 4),
     }
 
@@ -246,30 +279,50 @@ def _count_tsv_rows(path: Path) -> int:
     if not path.exists():
         return 0
     try:
-        return sum(
-            1 for line in open(path)
-            if line.strip()
-            and not line.startswith("#")
-            and not line.startswith("seq_name")
-        )
+        with open(path) as f:
+            return sum(
+                1 for line in f
+                if line.strip()
+                and not line.startswith("#")
+                and not line.startswith("seq_name")
+            )
     except Exception:
         return 0
 
 
 # ── Rich display helpers ──────────────────────────────────────────────────────
 
+def _color_score(score: float) -> str:
+    """Return Rich-colored string for a geNomad virus score."""
+    s = f"{score:.3f}"
+    if score >= _SCORE_GOOD: return f"[bold green]{s}[/bold green]"
+    if score >= _SCORE_WARN: return f"[bold yellow]{s}[/bold yellow]"
+    return f"[bold red]{s}[/bold red]"
+
+
+def _color_rate(val_str: str, good: float, warn: float) -> str:
+    """Return Rich-colored string based on numeric thresholds."""
+    try:
+        v = float(str(val_str).rstrip("%"))
+        if v >= good: return f"[bold green]{val_str}[/bold green]"
+        if v >= warn: return f"[bold yellow]{val_str}[/bold yellow]"
+        return f"[bold red]{val_str}[/bold red]"
+    except (ValueError, AttributeError):
+        return str(val_str)
+
+
 def _fmt(val, unit: str = "") -> str:
     """Format metric value; dim 'N/A' or missing entries."""
-    if val in ("N/A", "", None):
-        return "[dim]N/A[/dim]"
+    if val in ("N/A", "", None, 0, "0"):
+        return f"[dim]{val}{unit}[/dim]" if val in (0, "0") else "[dim]N/A[/dim]"
     return f"{val}{unit}"
 
 
-def _print_input_table(contigs: Path, stats: dict) -> None:
+def _print_input_table(sample_id: str, contigs: Path, stats: dict) -> None:
     log_info(f"  Contigs : {contigs}  ({human_size(contigs)})")
     log_info(
-        f"  Input   : {stats['n']} sequences | "
-        f"total={stats['total_bp']}bp | largest={stats['largest_bp']}bp"
+        f"  Input   : {stats['n']} sequence(s) | "
+        f"total={stats['total_bp']:,}bp | largest={stats['largest_bp']:,}bp"
     )
 
 
@@ -280,19 +333,21 @@ def _print_summary_table(sample_id: str, row: dict) -> None:
     n_bp  = row.get("viral_bp",   0)
     n_pls = row.get("plasmid",    0)
     n_prv = row.get("provirus",   0)
-    fam   = row.get("best_family", "unclassified")
-    score = row.get("best_score",  0.0)
+    taxon = row.get("best_taxon", "unclassified")
+    score = row.get("best_score", 0.0)
 
     pct_vir = f"{n_vir / n_in * 100:.1f}%" if n_in else "N/A"
+    colored_pct = _color_rate(pct_vir, 50.0, 5.0) if n_in else "[dim]N/A[/dim]"
 
     log_ok(
-        f"  Viral    : {_fmt(n_vir)} contig(s)  ({_fmt(n_bp, 'bp')})  "
-        f"· {pct_vir} of input"
+        f"  Contigs  : {n_in} input → {n_vir} viral "
+        f"({colored_pct})  |  {n_bp:,}bp total viral sequence"
     )
     log_ok(
-        f"  Plasmid  : {_fmt(n_pls)}  |  "
-        f"Provirus : {_fmt(n_prv)}  |  "
-        f"Best family : {_fmt(fam)}  (score={score:.3f})"
+        f"  Other    : plasmid={_fmt(n_pls)}  provirus={_fmt(n_prv)}"
+    )
+    log_ok(
+        f"  Best hit : {taxon}  |  score={_color_score(score)}"
     )
 
 
@@ -308,7 +363,7 @@ def _check_warnings(row: dict) -> None:
         )
         return
 
-    if n_in and n_vir / n_in < _VIRAL_FRACTION_WARN:
+    if n_in and (n_vir / n_in) < _VIRAL_FRACTION_WARN:
         log_warn(
             f"  Only {n_vir}/{n_in} contigs classified as viral "
             f"({n_vir / n_in * 100:.1f}%) — "
@@ -321,19 +376,29 @@ def _check_warnings(row: dict) -> None:
             "review lifecycle prediction carefully (Module 08)."
         )
 
+    if 0 < row.get("best_score", 0.0) < _SCORE_WARN:
+        log_warn(
+            f"  Best virus score {row['best_score']:.3f} < {_SCORE_WARN} — "
+            "borderline classification; consider manual inspection of contigs."
+        )
+
 
 def _print_completion_panel(
     sample_id: str, virus_fna: Path, rpt_dir: Path, row: dict
 ) -> None:
     n_in  = row.get("input_ctg",   "?")
     n_vir = row.get("viral_ctg",   "?")
-    fam   = row.get("best_family", "unclassified")
+    taxon = row.get("best_taxon",  "unclassified")
+    score = row.get("best_score",  0.0)
+    n_pls = row.get("plasmid",     0)
+    n_prv = row.get("provirus",    0)
 
     text = Text()
     text.append("✓ ", style="bold green")
     text.append(f"{n_in} contigs  →  ", style="dim white")
     text.append(f"{n_vir}", style="bold green")
-    text.append(f" viral  |  best family: {fam}\n\n", style="cyan")
+    text.append(f" viral  (plasmid={n_pls}  provirus={n_prv})\n", style="cyan")
+    text.append(f"  best hit : {taxon}  (score={score:.3f})\n\n", style="dim white")
     text.append("Virus FASTA : ", style="dim white")
     text.append(str(virus_fna) + "\n", style="white")
     text.append("Summary     : ", style="dim white")
@@ -350,11 +415,21 @@ def _print_completion_panel(
 
 # ── TSV summary ───────────────────────────────────────────────────────────────
 
+_TSV_HEADERS = [
+    "sample", "input_ctg", "viral_ctg", "viral_bp",
+    "plasmid", "provirus", "best_taxon", "best_score",
+]
+
+
 def _save_tsv(row: dict, path: Path) -> None:
-    """Write / update the geNomad summary TSV."""
-    headers = ["sample", "input_ctg", "viral_ctg", "viral_bp",
-               "plasmid", "provirus", "best_family"]
-    rows: dict[str, list] = {}
+    """
+    Write / update the geNomad summary TSV.
+
+    Existing rows are preserved and migrated to the current schema
+    (missing columns filled with empty strings), so re-running with
+    an older TSV does not lose previous samples.
+    """
+    rows: dict[str, dict] = {}
 
     if path.exists():
         with open(path) as f:
@@ -364,9 +439,9 @@ def _save_tsv(row: dict, path: Path) -> None:
                 if cols and cols[0]:
                     rows[cols[0]] = dict(zip(old_hdrs, cols))
 
-    rows[row["sample"]] = [str(row.get(h, "")) for h in headers]
+    rows[row["sample"]] = {h: str(row.get(h, "")) for h in _TSV_HEADERS}
 
     with open(path, "w") as f:
-        f.write("\t".join(headers) + "\n")
+        f.write("\t".join(_TSV_HEADERS) + "\n")
         for r in rows.values():
-            f.write("\t".join(r if isinstance(r, list) else [r.get(h, "") for h in headers]) + "\n")
+            f.write("\t".join(r.get(h, "") for h in _TSV_HEADERS) + "\n")

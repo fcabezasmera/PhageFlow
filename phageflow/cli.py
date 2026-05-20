@@ -190,11 +190,10 @@ def cmd_assembly(config, workdir, threads, force, sample_id, r1_path, r2_path):
 @click.option("--contigs", required=True, type=click.Path(exists=True),
               help="NR contigs FASTA (output of assembly step)")
 def cmd_viral_id(config, workdir, threads, force, sample_id, contigs):
-    """Viral identification with geNomad (activate genomad env first).
+    """Viral identification with geNomad.
 
     \b
     Example:
-      conda activate genomad
       phageflow viral-id --sample-id s1 \\
         --contigs results/03_assembly/combined/s1_contigs_nr.fasta
     """

@@ -170,7 +170,7 @@ def run(
               rpt_dir / "host_removal_summary.tsv")
     _print_summary_table(sample_id, stats, mode)
     _check_warnings(stats, mode)
-    _print_completion_panel(sample_id, r1_out, rpt_dir, stats)
+    _print_completion_panel(sample_id, r1_out, r2_out,rpt_dir, stats)
 
     log_step(f"Module 02 completed ✓  [{sample_id}]")
     log_info(
@@ -568,9 +568,7 @@ def _check_warnings(stats: dict, mode: str) -> None:
             pass
 
 
-def _print_completion_panel(
-    sample_id: str, r1_out: Path, rpt_dir: Path, stats: dict
-) -> None:
+def _print_completion_panel(sample_id, r1_out, r2_out, rpt_dir, stats) -> None:
     n_in  = stats.get("reads_in",    "?")
     n_out = stats.get("reads_phage", "?")
     ph    = stats.get("pct_phage",   "?")
@@ -583,6 +581,8 @@ def _print_completion_panel(
     text.append(f"  (phage: {ph}  |  host: {ho})\n\n", style="cyan")
     text.append("Output R1 : ", style="dim white")
     text.append(str(r1_out) + "\n", style="white")
+    text.append("Output R2 : ", style="dim white")
+    text.append(str(r2_out) + "\n", style="white")
     text.append("Summary   : ", style="dim white")
     text.append(str(rpt_dir / "host_removal_summary.tsv"), style="white")
 

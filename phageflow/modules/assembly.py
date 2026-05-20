@@ -152,7 +152,7 @@ def run(
     log_step(f"Module 03 completed ✓  [{sample_id}]")
     log_info(
         f"  Next: phageflow viral-id --sample-id {sample_id} "
-        f"--contigs {nr_fa}  (activate genomad env first)"
+        f"--contigs {nr_fa}"
     )
     return nr_fa
 

@@ -1,7 +1,7 @@
 """PhageFlow Module 05 — Genome quality assessment and selection.
 
 Tool:
-    CheckV (Nayfach et al. 2021, Nature Biotechnology):
+    CheckV v1.0+ (Nayfach et al. 2021, Nature Biotechnology):
         Estimates completeness, contamination, and topology (DTR/ITR)
         for viral genomes using a database of complete viral genomes.
 
@@ -37,7 +37,8 @@ STEP  = "05_quality"
 TOOLS = ["checkv"]
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
-_COMPLETENESS_CAUTION = 70.0   # HQ genome below this → worth a warning
+_COMPLETENESS_GOOD   = 90.0   # completeness: green
+_COMPLETENESS_WARN   = 70.0   # completeness: yellow; below → worth a warning
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -79,18 +80,21 @@ def run(
         raise FileNotFoundError(virus_fna)
 
     s = fasta_stats(virus_fna)
-    _print_input_table(virus_fna, s)
-    log_info(f"  HQ threshold : completeness ≥ {cfg.checkv.min_completeness}%")
-    log_info("  Nayfach et al. 2021, Nature Biotechnology")
+    _print_input_table(sample_id, virus_fna, s)
+    log_info(
+        f"  CheckV end-to-end  (Nayfach et al. 2021)  |  "
+        f"HQ threshold: completeness ≥ {cfg.checkv.min_completeness}%"
+    )
 
     if not cfg.databases.checkv.exists():
         log_warn(f"  CheckV database not found: {cfg.databases.checkv}")
 
     # ── Pipeline steps ────────────────────────────────────────────────────────
-    sdir   = out_dir / sample_id
-    qfile  = sdir / "quality_summary.tsv"
-    row    = {}
-    hq_seqs = draft_seqs = []
+    sdir      = out_dir / sample_id
+    qfile     = sdir / "quality_summary.tsv"
+    row       = {}
+    hq_seqs   = []
+    draft_seqs = []
 
     with Progress(
         SpinnerColumn(spinner_name="dots2"),
@@ -119,7 +123,10 @@ def run(
             _write_fasta(draft_seqs, draft_dir / f"{sample_id}_draft.fasta")
             log_ok("  \\[CheckV] genome selection complete")
         else:
-            log_warn("  \\[CheckV] no output found — check log in reports/05_quality/")
+            log_warn(
+                "  \\[CheckV] no output found — "
+                f"check reports/05_quality/{sample_id}_checkv.log"
+            )
         progress.advance(task)
 
     # ── Metrics, display, save ─────────────────────────────────────────────────
@@ -150,7 +157,7 @@ def _run_checkv(
     qfile = sdir / "quality_summary.tsv"
 
     if qfile.exists() and qfile.stat().st_size > 0 and not force:
-        log_info("  \\[CheckV] already processed — skipping")
+        log_info("  \\[CheckV] already processed — skipping  (--force to re-run)")
         return
 
     mkdirs(sdir)
@@ -177,11 +184,11 @@ def _validate_output(
 ) -> None:
     """Warn if no HQ genomes were found; confirm OK otherwise."""
     if hq_seqs:
-        log_ok(f"  validate · {len(hq_seqs)} HQ genome(s) ready for annotation — OK")
+        log_ok(f"  validate · {len(hq_seqs)} HQ genome(s) annotation-ready — OK")
     elif draft_seqs:
         log_warn(
-            f"  validate · 0 HQ genomes — {len(draft_seqs)} draft(s) available. "
-            "Consider lowering checkv.min_completeness in config.yaml."
+            f"  validate · 0 HQ genomes — {len(draft_seqs)} draft(s) in drafts/. "
+            "Lower checkv.min_completeness in config.yaml to include them."
         )
     else:
         log_warn(
@@ -217,9 +224,16 @@ def _parse_checkv(
     seqs:             dict,
     min_completeness: float,
 ) -> tuple:
+    """
+    Parse CheckV quality_summary.tsv and split sequences into HQ / draft tiers.
+
+    Returns (summary_dict, hq_seqs, draft_seqs).
+    Stores best_completeness as float for reliable comparison downstream.
+    """
     complete = hq = mq = lq = 0
-    best_len = 0
-    best_quality = ""
+    best_len          = 0
+    best_completeness = 0.0
+    best_quality_tier = ""
     hq_seqs:    list = []
     draft_seqs: list = []
 
@@ -230,10 +244,11 @@ def _parse_checkv(
             row = line.strip().split("\t")
             if not row or len(row) < 3:
                 continue
-            cid  = row[col.get("contig_id",      0)]
-            clen = row[col.get("contig_length",   1)]
-            qual = row[col.get("checkv_quality",  7)]
-            comp = row[col.get("completeness",    9)]
+
+            cid  = row[col.get("contig_id",     0)]
+            clen = row[col.get("contig_length",  1)]
+            qual = row[col.get("checkv_quality", 7)]
+            comp = row[col.get("completeness",   9)]
             seq  = seqs.get(cid, "")
 
             if qual == "Complete":         complete += 1
@@ -241,11 +256,13 @@ def _parse_checkv(
             elif qual == "Medium-quality": mq       += 1
             else:                          lq       += 1
 
+            # Track best genome by length
             try:
                 if int(clen) > best_len:
-                    best_len     = int(clen)
-                    best_quality = f"{comp}% {qual}"
-            except ValueError:
+                    best_len          = int(clen)
+                    best_completeness = float(comp) if comp not in ("", "NA", "N/A") else 0.0
+                    best_quality_tier = qual
+            except (ValueError, TypeError):
                 pass
 
             if seq:
@@ -255,13 +272,14 @@ def _parse_checkv(
                     draft_seqs.append((cid, seq, clen, comp, qual))
 
     summary = {
-        "sample":       sample_id,
-        "complete":     complete,
-        "hq":           hq,
-        "mq":           mq,
-        "lq":           lq,
-        "best_length":  f"{best_len}bp",
-        "best_quality": best_quality,
+        "sample":             sample_id,
+        "complete":           complete,
+        "hq":                 hq,
+        "mq":                 mq,
+        "lq":                 lq,
+        "best_length_bp":     best_len,
+        "best_completeness":  best_completeness,
+        "best_quality_tier":  best_quality_tier,
     }
     return summary, hq_seqs, draft_seqs
 
@@ -276,32 +294,46 @@ def _write_fasta(seqs_list: list, out_path: Path) -> None:
 
 # ── Rich display helpers ──────────────────────────────────────────────────────
 
+def _color_completeness(val: float) -> str:
+    """Return Rich-colored string for a completeness percentage."""
+    s = f"{val:.1f}%"
+    if val >= _COMPLETENESS_GOOD: return f"[bold green]{s}[/bold green]"
+    if val >= _COMPLETENESS_WARN: return f"[bold yellow]{s}[/bold yellow]"
+    return f"[bold red]{s}[/bold red]"
+
+
 def _fmt(val, unit: str = "") -> str:
-    """Format metric value; dim 'N/A' or missing entries."""
+    """Format metric value; dim missing/zero entries."""
     if val in ("N/A", "", None):
         return "[dim]N/A[/dim]"
     return f"{val}{unit}"
 
 
-def _print_input_table(virus_fna: Path, stats: dict) -> None:
+def _print_input_table(sample_id: str, virus_fna: Path, stats: dict) -> None:
     log_info(f"  Virus FASTA : {virus_fna}  ({human_size(virus_fna)})")
     log_info(
         f"  Input       : {stats['n']} contig(s) | "
-        f"total={stats['total_bp']}bp | largest={stats['largest_bp']}bp"
+        f"total={stats['total_bp']:,}bp | largest={stats['largest_bp']:,}bp"
     )
 
 
 def _print_summary_table(sample_id: str, row: dict) -> None:
     """Print CheckV quality tier counts as compact log lines."""
+    complete = row.get("complete", 0)
+    hq       = row.get("hq",       0)
+    mq       = row.get("mq",       0)
+    lq       = row.get("lq",       0)
+    blen     = row.get("best_length_bp",    0)
+    bcomp    = row.get("best_completeness", 0.0)
+    btier    = row.get("best_quality_tier", "")
+
     log_ok(
-        f"  Complete={_fmt(row['complete'])}  "
-        f"High-quality={_fmt(row['hq'])}  "
-        f"Medium-quality={_fmt(row['mq'])}  "
-        f"Low-quality/ND={_fmt(row['lq'])}"
+        f"  Tiers    : Complete={complete}  High-quality={hq}  "
+        f"Medium-quality={mq}  Low/ND={lq}"
     )
     log_ok(
-        f"  Best genome : {_fmt(row['best_length'])}  |  "
-        f"quality : {_fmt(row['best_quality'])}"
+        f"  Best     : {blen:,}bp  |  completeness={_color_completeness(bcomp)}  "
+        f"|  {_fmt(btier)}"
     )
 
 
@@ -311,9 +343,8 @@ def _check_warnings(row: dict, min_completeness: float) -> None:
 
     if total_hq == 0 and row.get("mq", 0) > 0:
         log_warn(
-            f"  No Complete/HQ genomes — {row['mq']} Medium-quality genome(s) moved "
-            f"to drafts/. Lower checkv.min_completeness (currently {min_completeness}%) "
-            "to include them in annotation."
+            f"  No Complete/HQ genomes — {row['mq']} Medium-quality draft(s) saved. "
+            f"Lower checkv.min_completeness (currently {min_completeness}%) to annotate them."
         )
     elif total_hq == 0:
         log_warn(
@@ -321,16 +352,12 @@ def _check_warnings(row: dict, min_completeness: float) -> None:
             "check geNomad output or assembly contiguity."
         )
 
-    best_q = row.get("best_quality", "")
-    try:
-        best_pct = float(best_q.split("%")[0])
-        if 0 < best_pct < _COMPLETENESS_CAUTION:
-            log_warn(
-                f"  Best completeness {best_pct:.1f}% < {_COMPLETENESS_CAUTION}% — "
-                "fragmented genome; annotation and lifecycle prediction may be affected."
-            )
-    except (ValueError, AttributeError, IndexError):
-        pass
+    bcomp = row.get("best_completeness", 0.0)
+    if 0 < bcomp < _COMPLETENESS_WARN:
+        log_warn(
+            f"  Best completeness {bcomp:.1f}% < {_COMPLETENESS_WARN}% — "
+            "fragmented genome; annotation and lifecycle prediction may be affected."
+        )
 
 
 def _print_completion_panel(
@@ -363,7 +390,6 @@ def _print_completion_panel(
     if draft_seqs:
         text.append("Drafts    : ", style="dim white")
         text.append(str(draft_dir / f"{sample_id}_draft.fasta") + "\n", style="white")
-
     text.append("Summary   : ", style="dim white")
     text.append(str(rpt_dir / "checkv_summary.tsv"), style="white")
 
@@ -372,17 +398,27 @@ def _print_completion_panel(
         title=f"[bold cyan]Quality complete — {sample_id}[/bold cyan]",
         border_style="cyan",
         padding=(0, 2),
-        width=72,
+        width=90,
     ))
 
 
 # ── TSV summary ───────────────────────────────────────────────────────────────
 
+_TSV_HEADERS = [
+    "sample", "complete", "hq", "mq", "lq",
+    "best_length_bp", "best_completeness", "best_quality_tier",
+]
+
+
 def _save_tsv(row: dict, path: Path) -> None:
-    """Write / update the CheckV summary TSV."""
-    headers = ["sample", "complete", "hq", "mq", "lq",
-               "best_length", "best_quality"]
-    rows: dict[str, list] = {}
+    """
+    Write / update the CheckV summary TSV.
+
+    Existing rows are preserved and migrated to the current schema
+    (missing columns filled with empty strings), so re-running with
+    an older TSV does not lose previous samples.
+    """
+    rows: dict[str, dict] = {}
 
     if path.exists():
         with open(path) as f:
@@ -392,9 +428,9 @@ def _save_tsv(row: dict, path: Path) -> None:
                 if cols and cols[0]:
                     rows[cols[0]] = dict(zip(old_hdrs, cols))
 
-    rows[row["sample"]] = [str(row.get(h, "")) for h in headers]
+    rows[row["sample"]] = {h: str(row.get(h, "")) for h in _TSV_HEADERS}
 
     with open(path, "w") as f:
-        f.write("\t".join(headers) + "\n")
+        f.write("\t".join(_TSV_HEADERS) + "\n")
         for r in rows.values():
-            f.write("\t".join(r if isinstance(r, list) else [r.get(h, "") for h in headers]) + "\n")
+            f.write("\t".join(r.get(h, "") for h in _TSV_HEADERS) + "\n")

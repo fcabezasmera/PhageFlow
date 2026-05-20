@@ -137,7 +137,7 @@ def run(
     _save_tsv(sample_id, metrics, rpt_dir / "qc_summary.tsv")
     _print_summary_table(sample_id, metrics)
     _check_warnings(metrics)
-    _print_completion_panel(sample_id, r1_out, rpt_dir, metrics)
+    _print_completion_panel(sample_id, r1_out, r2_out, rpt_dir, metrics)
 
     log_step(f"Module 01 completed ✓  [{sample_id}]")
     log_info(
@@ -406,9 +406,7 @@ def _check_warnings(m: dict) -> None:
         pass
 
 
-def _print_completion_panel(
-    sample_id: str, r1_out: Path, rpt_dir: Path, m: dict
-) -> None:
+def _print_completion_panel(sample_id, r1_out, r2_out, rpt_dir, m: dict) -> None:
     """Clean panel summarising output paths and key stats."""
     text = Text()
     text.append("✓ ", style="bold green")
@@ -417,6 +415,8 @@ def _print_completion_panel(
     text.append(f"  (pass rate: {m.get('pct_pass', '?')})\n\n", style="cyan")
     text.append("Trimmed R1 : ", style="dim white")
     text.append(str(r1_out) + "\n", style="white")
+    text.append("Trimmed R2 : ", style="dim white")
+    text.append(str(r2_out) + "\n", style="white")
     text.append("MultiQC    : ", style="dim white")
     text.append(str(rpt_dir / "multiqc" / "multiqc_qc.html"), style="white")
 
