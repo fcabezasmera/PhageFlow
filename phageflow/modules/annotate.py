@@ -23,22 +23,24 @@ Tier 2 — Phold v1.2+ (Bouras et al. 2024, Bioinformatics):
     --finetune  : phage-finetuned ProstT5 (better phage fold coverage)
     -s 9.5      : maximum Foldseek sensitivity (Steinegger 2017)
     --card_vfdb_evalue 1e-10 : strict AMR/VF threshold
-    Output: {candidate_id}.gbk in phold dir
 
 Tier 3 — Phynteny Transformer (Grigson et al. 2025, bioRxiv):
-    Input : Phold GBK  ← confirmed as intended workflow in benchmarking
-            (Zenodo v2: "Phold GBK used as input for Phynteny")
-    Integrates positional encoding + bidirectional LSTM + circular attention
-    transformer. Trained on 280 000+ phage genomes. AUC > 0.84 across
-    9 PHROG categories. Average +14% annotation improvement.
-    Output: phynteny_transformer.gbk (final annotated GBK)
+    Input : Phold GBK
+    Adds /phynteny_category, /phynteny_score, /phynteny_confidence qualifiers
+    per CDS. Delta is counted from these qualifiers (confidence ≥ threshold).
+    Does NOT modify /product or /function — those reflect the Phold state.
 
-Plot — phold plot (from Phynteny GBK = final annotations):
-    --all : one circular map per contig (essential for multi-contig bins)
-    --dpi 600 : publication-quality resolution
+Parser strategy (all tiers):
+    All annotation counts are derived from the GBK output files, not from
+    tool-specific TSVs.  This is more reliable because:
+      - Pharokka _cds_functions.tsv is a per-PHROG/category summary (not per-CDS)
+      - Phold per_cds TSV naming varies across versions
+      - Phynteny writes its predictions as GBK qualifiers, not in a plain TSV
+    Parsing the GBK directly gives per-CDS ground truth regardless of version.
 """
 
 from __future__ import annotations
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -58,18 +60,24 @@ STEP  = "06_annotation"
 TOOLS = ["pharokka.py", "phold", "phynteny_transformer"]
 
 # ── Phold parameters ──────────────────────────────────────────────────────────
-_PHOLD_SENSITIVITY = "9.5"    # max Foldseek sensitivity (Steinegger 2017)
+_PHOLD_SENSITIVITY = "9.5"
 _PHOLD_EVALUE      = "1e-3"
-_PHOLD_CARD_EVALUE = "1e-10"  # strict AMR/VF threshold
+_PHOLD_CARD_EVALUE = "1e-10"
 
 # ── Phold plot parameters ─────────────────────────────────────────────────────
 _PLOT_DPI         = "600"
-_PLOT_ANNOTATIONS = "1"       # label all annotated functions
+_PLOT_ANNOTATIONS = "1"
 _PLOT_LABEL_SIZE  = "8"
-_PLOT_INTERVAL    = "5000"    # axis tick every 5 kb
+_PLOT_INTERVAL    = "5000"
 
 # ── Phynteny parameters ───────────────────────────────────────────────────────
 _PHYNTENY_CONFIDENCE = 0.7
+
+# ── Annotation category sets ──────────────────────────────────────────────────
+_UNKNOWN_CATS = frozenset({
+    "unknown function", "hypothetical protein", "", "na", "none",
+    "unknown", "uncharacterized protein",
+})
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -80,17 +88,7 @@ def run(
     genome:    Path,
     force:     bool = False,
 ) -> Path:
-    """
-    Annotate a single phage candidate genome (three tiers + plot).
-
-    Parameters
-    ----------
-    genome : FASTA from quality/annotation_ready/
-
-    Returns
-    -------
-    final_gbk : Phynteny GBK if available, else Phold GBK, else Pharokka GBK
-    """
+    """Annotate a single phage candidate genome (three tiers + plot)."""
     require_tools(*TOOLS)
 
     genome       = Path(genome)
@@ -131,15 +129,13 @@ def run(
     plots_dir    = cdir / "plots"
     mkdirs(pharokka_dir, phold_dir, phynteny_dir, plots_dir)
 
-    # Output file paths
     gbk_pharokka = pharokka_dir / f"{candidate_id}.gbk"
-    gbk_phold    = phold_dir    / f"{candidate_id}.gbk"   # phold run -p {id} → {id}.gbk
+    gbk_phold    = phold_dir    / f"{candidate_id}.gbk"
 
     pharokka_stats: dict = {}
     phold_stats:    dict = {}
     phynteny_stats: dict = {}
 
-    # ── Pipeline steps ────────────────────────────────────────────────────────
     with Progress(
         SpinnerColumn(spinner_name="dots2"),
         TextColumn("[bold cyan]{task.description:<60}"),
@@ -155,9 +151,7 @@ def run(
         progress.update(task, description="[1/4] Pharokka  — gene calling + PHROG")
         _run_pharokka(cfg, candidate_id, genome, pharokka_dir, gbk_pharokka,
                       n_ctg, rpt_dir, force)
-        pharokka_stats = _parse_pharokka_tsv(
-            pharokka_dir / f"{candidate_id}_cds_functions.tsv"
-        )
+        pharokka_stats = _parse_pharokka_gbk(gbk_pharokka)
         if pharokka_stats:
             log_ok(
                 f"  [Tier 1 Pharokka] {pharokka_stats['total_cds']} CDS | "
@@ -169,7 +163,7 @@ def run(
         # 2/4 — Phold
         progress.update(task, description="[2/4] Phold     — structure-based upgrade")
         _run_phold(cfg, candidate_id, gbk_pharokka, phold_dir, gbk_phold, rpt_dir, force)
-        phold_stats = _parse_phold_per_cds(phold_dir, candidate_id)
+        phold_stats = _parse_phold_gbk_delta(gbk_phold, gbk_pharokka)
         if phold_stats:
             cum = pharokka_stats.get("annotated", 0) + phold_stats["upgraded"]
             tot = pharokka_stats.get("total_cds", 0)
@@ -184,11 +178,11 @@ def run(
         progress.update(task, description="[3/4] Phynteny  — synteny + ESM2 upgrade")
         _run_phynteny(cfg, candidate_id, gbk_phold, phynteny_dir, rpt_dir, force)
         gbk_phynteny = _find_phynteny_gbk(phynteny_dir, candidate_id)
-        phynteny_stats = _parse_phynteny_per_cds(phynteny_dir, candidate_id)
+        phynteny_stats = _parse_phynteny_gbk_delta(gbk_phynteny, phynteny_c)
         if phynteny_stats:
-            cum = (pharokka_stats.get("annotated", 0) +
-                   phold_stats.get("upgraded", 0) +
-                   phynteny_stats["upgraded"])
+            phold_cum = (pharokka_stats.get("annotated", 0) +
+                         phold_stats.get("upgraded", 0))
+            cum = phold_cum + phynteny_stats["upgraded"]
             tot = pharokka_stats.get("total_cds", 0)
             pct = f"{cum / tot * 100:.1f}%" if tot else "?"
             log_ok(
@@ -197,14 +191,13 @@ def run(
             )
         progress.advance(task)
 
-        # 4/4 — Phold plot (from Phynteny GBK = final annotations)
+        # 4/4 — Phold plot
         progress.update(task, description="[4/4] Phold plot — circular genome map")
         plot_input = gbk_phynteny if gbk_phynteny else gbk_phold
         _run_phold_plot(candidate_id, plot_input, plots_dir, rpt_dir, force)
         progress.advance(task)
 
-    # ── Final output ──────────────────────────────────────────────────────────
-    final_gbk = gbk_phynteny or gbk_phold if gbk_phold.exists() else gbk_pharokka
+    final_gbk = gbk_phynteny or (gbk_phold if gbk_phold.exists() else gbk_pharokka)
 
     _save_tsv(
         candidate_id, sample_id, genome,
@@ -243,7 +236,7 @@ def _run_pharokka(cfg, candidate_id, genome, pharokka_dir, gbk_out, n_ctg, rpt_d
         "-o",        str(pharokka_dir),
         "-d",        str(pharokka_db),
         "-p",        candidate_id,
-        "--dnaapler",               # boolean flag in v1.4+ — reorients to terminase
+        "--dnaapler",
         "--threads", str(cfg.threads),
         "--force",
     ]
@@ -267,9 +260,6 @@ def _run_pharokka(cfg, candidate_id, genome, pharokka_dir, gbk_out, n_ctg, rpt_d
 # ── Step 2: Phold run ─────────────────────────────────────────────────────────
 
 def _run_phold(cfg, candidate_id, input_gbk, phold_dir, gbk_out, rpt_dir, force):
-    """
-    Phold run with -p {candidate_id} → output GBK is {candidate_id}.gbk
-    """
     if gbk_out.exists() and gbk_out.stat().st_size > 0 and not force:
         log_info("  [Phold] already exists — skipping  (--force to re-run)")
         return
@@ -314,17 +304,13 @@ def _run_phold(cfg, candidate_id, input_gbk, phold_dir, gbk_out, rpt_dir, force)
 # ── Step 3: Phynteny Transformer ──────────────────────────────────────────────
 
 def _run_phynteny(cfg, candidate_id, input_gbk, phynteny_dir, rpt_dir, force):
-    """
-    Phynteny takes Phold GBK as input (confirmed workflow in benchmarking).
-    Default output: phynteny_transformer.gbk + phynteny_per_cds_functions.tsv
-    """
     if not input_gbk.exists():
         log_warn("  [Phynteny] skipped — Phold GBK not found")
         return
 
     existing = list(phynteny_dir.glob("*.gbk"))
     if existing and not force:
-        log_info(f"  [Phynteny] already exists — skipping  (--force to re-run)")
+        log_info("  [Phynteny] already exists — skipping  (--force to re-run)")
         return
 
     models_path = cfg.databases.phynteny / "models"
@@ -353,19 +339,15 @@ def _run_phynteny(cfg, candidate_id, input_gbk, phynteny_dir, rpt_dir, force):
 
 
 def _find_phynteny_gbk(phynteny_dir: Path, candidate_id: str) -> Optional[Path]:
-    """
-    Locate Phynteny output GBK with fallbacks for different naming conventions.
-    Default (no prefix): phynteny_transformer.gbk
-    With --prefix {id}: possibly {id}.gbk or {id}_phynteny_transformer.gbk
-    """
+    """Locate Phynteny output GBK — checks known naming patterns before glob."""
     candidates = [
         phynteny_dir / "phynteny_transformer.gbk",
+        phynteny_dir / "phynteny.gbk",
         phynteny_dir / f"{candidate_id}.gbk",
         phynteny_dir / f"{candidate_id}_phynteny_transformer.gbk",
     ]
     found = next((p for p in candidates if p.exists()), None)
     if found is None:
-        # Try any GBK in the directory
         gbks = list(phynteny_dir.glob("*.gbk"))
         found = gbks[0] if gbks else None
     return found
@@ -374,13 +356,6 @@ def _find_phynteny_gbk(phynteny_dir: Path, candidate_id: str) -> Optional[Path]:
 # ── Step 4: Phold plot ────────────────────────────────────────────────────────
 
 def _run_phold_plot(candidate_id, input_gbk, plots_dir, rpt_dir, force):
-    """
-    Generate circular genome plot(s) from the final annotated GBK.
-    Input is the Phynteny GBK (most annotated) — the plot reflects all 3 tiers.
-    --all : one plot per contig (multi-contig genomes generate N plots).
-    --dpi 600 : publication-quality.
-    -p must match prefix used in phold run.
-    """
     if not input_gbk or not input_gbk.exists():
         log_warn("  [Phold plot] skipped — no input GBK found")
         return
@@ -413,120 +388,170 @@ def _run_phold_plot(candidate_id, input_gbk, plots_dir, rpt_dir, force):
         log_warn(f"  [Phold plot] warning: {e}")
 
 
-# ── Parsers ───────────────────────────────────────────────────────────────────
+# ── GBK parsers ───────────────────────────────────────────────────────────────
 
-def _parse_pharokka_tsv(tsv: Path) -> dict:
-    """Parse Pharokka *_cds_functions.tsv for tier 1 annotation counts."""
-    if not tsv.exists():
-        return {}
-    total = annotated = 0
+def _gbk_cds_qualifiers(gbk_path: Path) -> list[dict]:
+    """
+    Return a list of qualifier dicts, one per CDS feature in the GBK.
+
+    Extracted keys: locus_tag, product, function, phrog,
+                    phynteny_category, phynteny_confidence, phynteny_score.
+
+    Rationale: parsing the GBK is more reliable than reading tool-specific
+    TSVs because:
+      - Pharokka _cds_functions.tsv is a per-category summary (not per-CDS)
+      - Phold per_cds TSV naming conventions vary by version
+      - Phynteny writes predictions as /phynteny_* GBK qualifiers only
+    """
+    if not gbk_path or not gbk_path.exists():
+        return []
+
     try:
-        with open(tsv) as f:
-            header = f.readline().strip().split("\t")
-            col    = {h: i for i, h in enumerate(header)}
-            for line in f:
-                if not line.strip():
-                    continue
-                row = line.strip().split("\t")
-                total += 1
-                cat = row[col.get("category", 1)] if len(row) > 1 else ""
-                if cat and cat.lower() not in ("unknown function", "hypothetical protein", ""):
-                    annotated += 1
+        text = gbk_path.read_text(errors="replace")
     except Exception:
+        return []
+
+    results = []
+    for block in text.split("     CDS ")[1:]:
+        def _q(name: str) -> str:
+            m = re.search(rf'/{name}="((?:[^"\\]|\\.|\n\s+)*)"', block)
+            if not m:
+                return ""
+            # Collapse wrapped lines: GBK wraps long values across indented lines
+            return re.sub(r'\n\s+', ' ', m.group(1)).strip()
+
+        results.append({
+            "locus_tag":           _q("locus_tag"),
+            "product":             _q("product").lower(),
+            "function":            _q("function").lower(),
+            "phrog":               _q("phrog"),
+            "phynteny_category":   _q("phynteny_category").lower(),
+            "phynteny_confidence": _q("phynteny_confidence"),
+            "phynteny_score":      _q("phynteny_score"),
+        })
+    return results
+
+
+def _is_annotated(cds: dict) -> bool:
+    """Return True if the CDS has a real (non-hypothetical) annotation."""
+    return (
+        cds["product"]  not in _UNKNOWN_CATS or
+        cds["function"] not in _UNKNOWN_CATS
+    )
+
+
+def _parse_pharokka_gbk(gbk_path: Path) -> dict:
+    """
+    Parse the Pharokka GBK to get per-CDS annotation counts.
+
+    Replaces _parse_pharokka_tsv: the _cds_functions.tsv produced by
+    Pharokka v1.9+ is a per-PHROG/category summary (one row per unique
+    PHROG category), not a per-CDS table. Parsing the GBK directly gives
+    the correct total_cds, annotated, and hypothetical counts.
+    """
+    cds_list = _gbk_cds_qualifiers(gbk_path)
+    if not cds_list:
         return {}
-    hypo = total - annotated
-    pct  = f"{annotated / total * 100:.1f}%" if total else "0.0%"
-    return {"total_cds": total, "annotated": annotated,
-            "hypothetical": hypo, "pct_annotated": pct}
+
+    total     = len(cds_list)
+    annotated = sum(1 for c in cds_list if _is_annotated(c))
+    hypo      = total - annotated
+    pct       = f"{annotated / total * 100:.1f}%" if total else "0.0%"
+
+    return {
+        "total_cds":    total,
+        "annotated":    annotated,
+        "hypothetical": hypo,
+        "pct_annotated": pct,
+    }
 
 
-def _parse_phold_per_cds(phold_dir: Path, candidate_id: str) -> dict:
+def _parse_phold_gbk_delta(phold_gbk: Path, pharokka_gbk: Path) -> dict:
     """
-    Count hypothetical proteins upgraded by Phold.
-    Phold generates {candidate_id}_per_cds_functions.tsv (similar to Pharokka).
-    Falls back to glob search for the TSV.
+    Count proteins newly annotated by Phold (delta vs Pharokka).
+
+    Delta = CDS where /product changed FROM "hypothetical protein"
+    TO a real function in the Phold GBK.  Phold with --hyps only processes
+    hypothetical proteins, so any product change from hypothetical → annotated
+    is a Phold upgrade.
+
+    Reclassification of already-annotated CDS (e.g. "DNA" → "DNA, RNA and
+    nucleotide metabolism") is tracked separately for transparency but is NOT
+    counted in 'upgraded' because the protein was already functionally annotated.
     """
-    tsv_candidates = [
-        phold_dir / f"{candidate_id}_per_cds_functions.tsv",
-        phold_dir / f"{candidate_id}_phold_per_cds_functions.tsv",
-        phold_dir / "phold_per_cds_functions.tsv",
-    ]
-    tsv = next((p for p in tsv_candidates if p.exists()), None)
-    if tsv is None:
-        tsv_files = list(phold_dir.glob("*per_cds*.tsv")) + list(phold_dir.glob("*functions.tsv"))
-        tsv = tsv_files[0] if tsv_files else None
-    if tsv is None:
+    pk_list = _gbk_cds_qualifiers(pharokka_gbk)
+    ph_list = _gbk_cds_qualifiers(phold_gbk)
+
+    if not pk_list or not ph_list:
+        return {}
+
+    pk_map = {c["locus_tag"]: c for c in pk_list if c["locus_tag"]}
+    ph_map = {c["locus_tag"]: c for c in ph_list if c["locus_tag"]}
+
+    upgraded       = 0   # hypothetical → annotated
+    reclassified   = 0   # annotated → differently annotated (category change)
+
+    for locus, ph_cds in ph_map.items():
+        if locus not in pk_map:
+            continue
+        pk_cds = pk_map[locus]
+        was_hypo  = not _is_annotated(pk_cds)
+        now_ann   = _is_annotated(ph_cds)
+
+        if was_hypo and now_ann:
+            upgraded += 1
+        elif (not was_hypo) and (pk_cds["function"] != ph_cds["function"]):
+            reclassified += 1
+
+    if reclassified:
+        log_info(
+            f"  [Phold] {reclassified} CDS reclassified (function category updated, "
+            f"not counted in Δ since product was already annotated)"
+        )
+
+    total_phold = sum(1 for c in ph_list if _is_annotated(c))
+    return {
+        "upgraded":      upgraded,
+        "reclassified":  reclassified,
+        "total_annotated": total_phold,
+    }
+
+
+def _parse_phynteny_gbk_delta(gbk_path: Optional[Path], confidence: float) -> dict:
+    """
+    Count Phynteny predictions from /phynteny_category qualifiers.
+
+    Phynteny Transformer does NOT modify /product or /function — it adds
+    three new qualifiers per CDS:
+        /phynteny_category   — predicted PHROG category
+        /phynteny_confidence — prediction confidence (0–1)
+        /phynteny_score      — raw model score
+
+    Delta = CDS that were still hypothetical after Phold AND received a
+    /phynteny_category with confidence ≥ threshold.
+    """
+    if not gbk_path:
+        return {}
+
+    cds_list = _gbk_cds_qualifiers(gbk_path)
+    if not cds_list:
         return {}
 
     upgraded = 0
-    try:
-        with open(tsv) as f:
-            header = f.readline().strip().split("\t")
-            col    = {h: i for i, h in enumerate(header)}
-            for line in f:
-                if not line.strip():
-                    continue
-                row   = line.strip().split("\t")
-                phrog = row[col.get("phrog", 0)] if row else ""
-                cat   = row[col.get("category", 1)] if len(row) > 1 else ""
-                if (phrog and phrog not in ("No_PHROG", "", "NA")) or \
-                   (cat and cat.lower() not in ("unknown function", "hypothetical protein", "")):
-                    upgraded += 1
-    except Exception:
-        return {}
-    return {"upgraded": upgraded, "tsv": str(tsv)}
+    for cds in cds_list:
+        cat  = cds["phynteny_category"]
+        conf_s = cds["phynteny_confidence"]
+        if not cat or cat in _UNKNOWN_CATS:
+            continue
+        try:
+            conf = float(conf_s)
+        except (ValueError, TypeError):
+            conf = 0.0
+        # Count only CDS that are still hypothetical in the /product qualifier
+        # (Phold didn't already annotate them) and got a confident Phynteny call
+        if cds["product"] in _UNKNOWN_CATS and conf >= confidence:
+            upgraded += 1
 
-
-def _parse_phynteny_per_cds(phynteny_dir: Path, candidate_id: str) -> dict:
-    """
-    Count proteins upgraded by Phynteny via phynteny_per_cds_functions.tsv.
-    This is the Phynteny-equivalent of pharokka_cds_functions.tsv.
-    """
-    tsv_candidates = [
-        phynteny_dir / f"{candidate_id}_phynteny_per_cds_functions.tsv",
-        phynteny_dir / "phynteny_per_cds_functions.tsv",
-        phynteny_dir / f"{candidate_id}_per_cds_functions.tsv",
-    ]
-    tsv = next((p for p in tsv_candidates if p.exists()), None)
-    if tsv is None:
-        tsv_files = list(phynteny_dir.glob("*per_cds*.tsv"))
-        tsv = tsv_files[0] if tsv_files else None
-    if tsv is None:
-        return {}
-
-    upgraded = 0
-    confidence = _PHYNTENY_CONFIDENCE
-    try:
-        with open(tsv) as f:
-            header = f.readline().strip().split("\t")
-            col    = {h.lower().strip(): i for i, h in enumerate(header)}
-            conf_col = next(
-                (col[k] for k in ("confidence", "score", "phynteny_score") if k in col),
-                None
-            )
-            cat_col = next(
-                (col[k] for k in ("category", "function", "phrog_category") if k in col),
-                None
-            )
-            for line in f:
-                if not line.strip():
-                    continue
-                row = line.strip().split("\t")
-                cat_ok  = False
-                conf_ok = conf_col is None  # no conf col → accept any annotation
-                if cat_col is not None and cat_col < len(row):
-                    cat_ok = row[cat_col].strip().lower() not in (
-                        "", "unknown function", "hypothetical protein", "na", "none"
-                    )
-                if conf_col is not None and conf_col < len(row):
-                    try:
-                        conf_ok = float(row[conf_col]) >= confidence
-                    except (ValueError, TypeError):
-                        conf_ok = False
-                if cat_ok and conf_ok:
-                    upgraded += 1
-    except Exception:
-        return {}
     return {"upgraded": upgraded}
 
 
@@ -541,8 +566,7 @@ def _print_completion_panel(
     p2      = phold_stats.get("upgraded",        0)
     p3      = phynteny_stats.get("upgraded",     0)
     final_n = p1 + p2 + p3
-    final_h = total - final_n
-    final_p = f"{final_n / total * 100:.1f}%" if total else "?"
+    final_h = max(0, total - final_n)
     plots   = list(plots_dir.glob("*.png")) + list(plots_dir.glob("*.svg"))
 
     text = Text()
@@ -551,15 +575,19 @@ def _print_completion_panel(
         f"  Tier 1 Pharokka : {p1:>4}/{total} ({pharokka_stats.get('pct_annotated', '?')})\n",
         style="cyan",
     )
-    text.append(
-        f"  Tier 2 Phold    : +{p2:>3}  → {p1+p2:>4}/{total} "
-        f"({(p1+p2)/total*100:.1f}% if total else '?')\n",
-        style="cyan",
-    ) if total else None
-    text.append(
-        f"  Tier 3 Phynteny : +{p3:>3}  → {final_n:>4}/{total} ({final_p})\n",
-        style="bold green",
-    )
+
+    if total:
+        pct2 = f"{(p1 + p2) / total * 100:.1f}%"
+        text.append(
+            f"  Tier 2 Phold    : +{p2:>3}  → {p1 + p2:>4}/{total} ({pct2})\n",
+            style="cyan",
+        )
+        pct3 = f"{final_n / total * 100:.1f}%"
+        text.append(
+            f"  Tier 3 Phynteny : +{p3:>3}  → {final_n:>4}/{total} ({pct3})\n",
+            style="bold green",
+        )
+
     text.append(
         f"  Still unknown   : {final_h:>4}/{total}\n\n",
         style="dim white",
@@ -611,20 +639,20 @@ def _save_tsv(
     p2    = phold_stats.get("upgraded",      0)
     p3    = phynteny_stats.get("upgraded",   0)
     final = p1 + p2 + p3
-    hypo  = total - final
+    hypo  = max(0, total - final)
 
     rows[candidate_id] = {
-        "candidate_id":        candidate_id,
-        "sample_id":           sample_id,
-        "genome_bp":           str(s.get("total_bp", 0)),
-        "total_cds":           str(total),
-        "tier1_pharokka":      str(p1),
-        "tier1_pct":           pharokka_stats.get("pct_annotated", ""),
-        "tier2_phold_delta":   str(p2),
-        "tier3_phynteny_delta":str(p3),
-        "final_annotated":     str(final),
-        "final_pct":           f"{final/total*100:.1f}%" if total else "",
-        "final_hypothetical":  str(hypo),
+        "candidate_id":         candidate_id,
+        "sample_id":            sample_id,
+        "genome_bp":            str(s.get("total_bp", 0)),
+        "total_cds":            str(total),
+        "tier1_pharokka":       str(p1),
+        "tier1_pct":            pharokka_stats.get("pct_annotated", ""),
+        "tier2_phold_delta":    str(p2),
+        "tier3_phynteny_delta": str(p3),
+        "final_annotated":      str(final),
+        "final_pct":            f"{final/total*100:.1f}%" if total else "",
+        "final_hypothetical":   str(hypo),
     }
 
     with open(path, "w") as f:
