@@ -1,18 +1,23 @@
 project: PhageFlow
-version: "3.0.0"
+version: "3.1.0"
 mode: purified_phage
 
 samples_file: config/samples.tsv
 
-threads: 16
-memory_gb: 16
+threads: 24
+memory_gb: 32
+
+dirs:
+  databases: databases
+  results:   results
+  reports:   reports
 
 databases:
   checkv:   databases/checkv_db/checkv-db-v1.5
   pharokka: databases/pharokka_db
   genomad:  databases/genomad_db
   phold:    databases/phold_db
-  kraken2: /path/to/kraken2_db
+  kraken2:  databases/k2_db
 
 envs:
   main:      phageflow
@@ -25,8 +30,11 @@ assembly:
   min_length: 200
 
 genomad:
-  min_score: 0.7
-  min_virus_hallmarks: 0 
+  min_score:          0.7
+  min_virus_hallmarks: 0
 
 checkv:
-  min_completeness: 50
+  min_completeness: 50      # MQ threshold para annotation_ready
+  min_viral_genes:  1       # LQ rescue: mín. genes virales para guardar en drafts/
+  length_rescue:    10000   # ND rescue: contig >= N bp con >= 1 gen viral → drafts/
+  min_contig_bp:    1500    # filtro global: contigs < N bp descartados (Roux 2019)

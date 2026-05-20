@@ -8,25 +8,16 @@ Pharokka v1.6+ (Bouras et al. 2023, Bioinformatics):
 
     --single                 : single contig mode for isolated phage genomes.
     --meta                   : metagenomic mode for multi-contig inputs.
-    --dnaapler all           : attempts reorientation to terminase large subunit
-                               (standard convention for phage genome deposition;
+    --dnaapler all           : reorientation al terminase large subunit usando
+                               todos los modos disponibles (Dnaapler v0.6+;
                                Casjens & Thuman-Commike 2011, Virology).
-    --gene_predict_hmm       : PHANOTATE + HMMER hybrid calling for better
-                               sensitivity on divergent phages.
+    --gene_predict_hmm       : PHANOTATE + HMMER hybrid calling.
 
 Phold v0.2+ (Bouras et al. 2024):
     Protein structure-based annotation using ProstT5 language model
     and Foldseek structural alignment to PHROGs.
     Complements Pharokka by assigning function to hypothetical proteins
     that lack sequence homology.
-
-    Phold lives in a separate conda environment (cfg.envs.phold).
-    It is invoked automatically via `conda run` — no manual env switching needed.
-
-Integration strategy:
-    Pharokka → base annotation (sequence homology to PHROGs)
-    Phold    → structural function calls for hypothetical proteins
-    Combined outputs are used for safety screening and lifecycle prediction.
 """
 
 from __future__ import annotations
@@ -38,7 +29,7 @@ from phageflow.utils.logger import log_step, log_info, log_ok, log_warn, log_err
 from phageflow.utils.tools import require_tools, run_silent, human_size, mkdirs, fasta_stats
 
 STEP  = "06_annotation"
-TOOLS = ["pharokka.py"]          # phold is in a separate env — checked at runtime
+TOOLS = ["pharokka.py"]
 
 
 def run(
@@ -95,9 +86,9 @@ def run(
     if gbk_out.exists() and gbk_out.stat().st_size > 0 and not force:
         log_info("  [Pharokka] already exists — skipping")
     else:
-        n_ctg     = s["n"]
-        log_info(f"  [Pharokka] mode: {'meta' if n_ctg > 1 else 'single'} "
-                 f"({n_ctg} contig{'s' if n_ctg > 1 else ''})")
+        n_ctg = s["n"]
+        mode  = "meta" if n_ctg > 1 else "single"
+        log_info(f"  [Pharokka] mode: {mode} ({n_ctg} contig{'s' if n_ctg > 1 else ''})")
         try:
             run_silent([
                 "pharokka.py",
@@ -105,7 +96,8 @@ def run(
                 "-o", str(pharokka_dir),
                 "-d", str(pharokka_db),
                 "-p", sample_id,
-                "--dnaapler",
+                "--dnaapler", "all",   # FIX: argumento explícito requerido en pharokka >= 1.4
+                                       # Bouras et al. 2023; Dnaapler v0.6+
                 "--threads", str(cfg.threads),
                 "--force",
             ], log_file=rpt_dir / f"{sample_id}_pharokka.log")
@@ -127,7 +119,7 @@ def run(
     gbk_phold = phold_dir / f"{sample_id}_phold.gbk"
     mkdirs(phold_dir)
 
-    phold_env = cfg.envs.phold     # "phold"
+    phold_env = cfg.envs.phold
 
     if not shutil.which("conda"):
         log_warn("  [Phold] conda not found in PATH — skipping Phold")
@@ -162,7 +154,6 @@ def run(
             f"→ function assigned"
         )
 
-    # ── Final output ──────────────────────────────────────────────────────────
     final_gbk = gbk_phold if gbk_phold.exists() else gbk_out
 
     _save_tsv(
@@ -184,7 +175,6 @@ def run(
 # ---------------------------------------------------------------------------
 
 def _parse_pharokka_tsv(tsv: Path) -> dict:
-    """Parse pharokka _cds_functions.tsv to get annotation statistics."""
     if not tsv.exists():
         return {}
     total = annotated = 0
@@ -205,15 +195,14 @@ def _parse_pharokka_tsv(tsv: Path) -> dict:
     hypo = total - annotated
     pct  = f"{annotated / total * 100:.1f}%" if total else "0.0%"
     return {
-        "total_cds":    total,
-        "annotated":    annotated,
-        "hypothetical": hypo,
+        "total_cds":     total,
+        "annotated":     annotated,
+        "hypothetical":  hypo,
         "pct_annotated": pct,
     }
 
 
 def _parse_phold_tsv(tsv: Path) -> dict:
-    """Count how many hypothetical proteins phold upgraded."""
     if not tsv.exists():
         return {}
     upgraded = 0

@@ -20,7 +20,6 @@ class Sample:
                 errors.append(f"[{self.sample_id}] {attr} not found: {path}")
         return errors
 
-    # alias used in qc.py
     def validate_reads(self) -> List[str]:
         return self.validate()
 
@@ -61,14 +60,24 @@ class GenomadConfig:
 @dataclass
 class CheckvConfig:
     min_completeness: float = 50.0
+    # ── nuevos parámetros (v3.1) ──────────────────────────────────────────────
+    # Rescate Low-quality: mínimo de genes virales para promover a drafts/
+    # (Nayfach et al. 2021, Nat Biotechnol 39:578; Roux et al. 2019, eLife)
+    min_viral_genes:  int   = 1
+    # Rescate Not-determined: longitud mínima para considerar un contig ND
+    # como potencial fago grande (Camargo et al. 2023, Nat Biotechnol)
+    length_rescue:    int   = 10_000
+    # Filtro de longitud mínima por contig viral antes de cualquier análisis
+    # (Roux et al. 2019; Camargo et al. 2023 usan 1 kb en geNomad)
+    min_contig_bp:    int   = 1_500
 
 
 @dataclass
 class DatabaseConfig:
-    checkv:   Path          = Path("databases/checkv_db/checkv-db-v1.5")
-    pharokka: Path          = Path("databases/pharokka_db")
-    genomad:  Path          = Path("databases/genomad_db")
-    phold:    Path          = Path("databases/phold_db")
+    checkv:   Path           = Path("databases/checkv_db/checkv-db-v1.5")
+    pharokka: Path           = Path("databases/pharokka_db")
+    genomad:  Path           = Path("databases/genomad_db")
+    phold:    Path           = Path("databases/phold_db")
     kraken2:  Optional[Path] = None
 
 
@@ -152,7 +161,10 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
         cfg.genomad.min_hallmarks = int(g.get("min_hallmarks", cfg.genomad.min_hallmarks))
 
     if "checkv" in raw:
-        cfg.checkv.min_completeness = float(
-            raw["checkv"].get("min_completeness", cfg.checkv.min_completeness))
+        c = raw["checkv"]
+        cfg.checkv.min_completeness = float(c.get("min_completeness", cfg.checkv.min_completeness))
+        cfg.checkv.min_viral_genes  = int(  c.get("min_viral_genes",  cfg.checkv.min_viral_genes))
+        cfg.checkv.length_rescue    = int(  c.get("length_rescue",    cfg.checkv.length_rescue))
+        cfg.checkv.min_contig_bp    = int(  c.get("min_contig_bp",    cfg.checkv.min_contig_bp))
 
     return cfg
