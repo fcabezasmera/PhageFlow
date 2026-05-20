@@ -63,9 +63,9 @@ class CheckvConfig:
     min_viral_genes:    int   = 1
     length_rescue:      int   = 10_000
     min_contig_bp:      int   = 1_500
-    large_nd_rescue_bp: int   = 30_000  # ND ≥ N bp + ≥1 gen viral → annotation_ready
-    min_bin_rescue_bp:  int   = 30_000  # bin de drafts ≥ N bp → annotation_ready
-    min_gene_density:   float = 0.5     # genes virales/kb — rescate por densidad
+    large_nd_rescue_bp: int   = 30_000  # ND ≥ N bp + ≥1 viral gene → annotation_ready/
+    min_bin_rescue_bp:  int   = 30_000  # draft bin ≥ N bp total → annotation_ready/
+    min_gene_density:   float = 0.5     # viral genes/kb — density-based rescue
 
 
 @dataclass
@@ -153,8 +153,11 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
 
     if "genomad" in raw:
         g = raw["genomad"]
-        cfg.genomad.min_score     = float(g.get("min_score", cfg.genomad.min_score))
-        cfg.genomad.min_hallmarks = int(g.get("min_hallmarks", cfg.genomad.min_hallmarks))
+        cfg.genomad.min_score = float(g.get("min_score", cfg.genomad.min_score))
+        # Accept both "min_virus_hallmarks" (YAML key) and "min_hallmarks" (legacy)
+        cfg.genomad.min_hallmarks = int(
+            g.get("min_virus_hallmarks", g.get("min_hallmarks", cfg.genomad.min_hallmarks))
+        )
 
     if "checkv" in raw:
         c = raw["checkv"]
@@ -165,6 +168,5 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
         cfg.checkv.large_nd_rescue_bp = int(  c.get("large_nd_rescue_bp", cfg.checkv.large_nd_rescue_bp))
         cfg.checkv.min_bin_rescue_bp  = int(  c.get("min_bin_rescue_bp",  cfg.checkv.min_bin_rescue_bp))
         cfg.checkv.min_gene_density   = float(c.get("min_gene_density",   cfg.checkv.min_gene_density))
-        
 
     return cfg

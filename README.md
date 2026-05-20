@@ -3,18 +3,20 @@
 **Modular bacteriophage genomics pipeline for Illumina paired-end sequencing.**
 
 PhageFlow processes raw reads from purified phage preparations through quality
-control, host removal, assembly, viral identification, quality assessment,
-annotation, biosafety screening, and lifecycle prediction — one sample at a
-time, with full control at each step.
+control, host removal, assembly, viral identification, and quality assessment —
+one sample at a time, with full control at each step.
 
 ```
-reads → QC → host removal → assembly → viral ID → quality →
-annotation → biosafety → lifecycle → final genomes
+reads → QC → host removal → assembly → viral ID → quality → [annotation → safety]
 ```
 
 > **Mode:** `purified_phage` — optimised for preparations where the dominant
 > nucleic acid is phage DNA. Parameters and rescue thresholds reflect this
 > assumption throughout.
+
+> **Status:** modules 01–05 fully implemented and validated.
+> Annotation (Pharokka + Phold) and safety screening (CARD + VFDB) are
+> available in the codebase but under active development.
 
 ---
 
@@ -24,18 +26,14 @@ annotation → biosafety → lifecycle → final genomes
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Samples file](#samples-file)
-- [Environment setup](#environment-setup)
 - [Modules](#modules)
   - [qc](#qc)
   - [host-removal](#host-removal)
   - [assembly](#assembly)
   - [viral-id](#viral-id)
   - [quality](#quality)
-  - [annotate](#annotate)
-  - [safety](#safety)
-  - [lifecycle](#lifecycle)
 - [Output structure](#output-structure)
-- [Running all samples in a loop](#running-all-samples-in-a-loop)
+- [Running all samples](#running-all-samples-in-a-loop)
 - [Databases](#databases)
 - [Citation](#citation)
 - [Authors](#authors)
@@ -44,6 +42,13 @@ annotation → biosafety → lifecycle → final genomes
 
 ## Installation
 
+### Requirements
+
+- Linux (Ubuntu 20.04+)
+- [Miniforge](https://github.com/conda-forge/miniforge) or Miniconda with **mamba**
+- ~60 GB free disk space for databases
+- NVIDIA GPU recommended for Phold (CPU fallback available)
+
 ### 1. Clone the repository
 
 ```bash
@@ -51,96 +56,93 @@ git clone https://github.com/fcabezasmera/PhageFlow.git
 cd PhageFlow
 ```
 
-### 2. Create the main conda environment
+### 2. Create the conda environment
+
+All tools including geNomad and Phold live in a single `phageflow` environment.
 
 ```bash
-conda create -n phageflow python=3.11 -y
+mamba create -n phageflow -c conda-forge -c bioconda -y \
+    python=3.11 \
+    fastp fastqc multiqc \
+    "bwa-mem2>=2.2" "samtools>=1.15" seqtk \
+    spades megahit cd-hit \
+    checkv pharokka \
+    seqkit abricate \
+    ncbi-datasets-cli kraken2
+
 conda activate phageflow
+```
+
+Install GPU-optimised tools separately to resolve their CUDA dependencies:
+
+```bash
+# Phold (structure-based annotation, GPU-accelerated)
+mamba install -y bioconda::phold "pytorch=*=cuda*"
+
+# geNomad (viral identification)
+mamba install -y bioconda::genomad
+
+# Phynteny transformer (phage lifestyle prediction — future module)
+mamba install -y bioconda::phynteny_transformer
+```
+
+Register PhageFlow in the environment:
+
+```bash
 pip install -e .
 ```
 
-### 3. Install external tools
+### 3. Set up databases
+
+Run all downloads with `conda activate phageflow` from the project root.
 
 ```bash
-# Main environment
-conda install -c bioconda -c conda-forge \
-    fastp fastqc multiqc \
-    bwa-mem2 samtools seqtk \
-    spades megahit cd-hit \
-    checkv pharokka seqkit \
-    abricate \
-    ncbi-datasets-cli kraken2 -y
-
-# geNomad (separate environment)
-conda create -n genomad -c conda-forge -c bioconda genomad -y
-
-# Phold (separate environment)
-conda create -n phold -c conda-forge -c bioconda phold -y
-
-# BACPHLIP (separate environment)
-conda create -n bacphlip -c conda-forge -c bioconda bacphlip -y
-```
-
-### 4. Register the PhageFlow CLI in every environment
-
-Modules that require a separate environment still need access to the
-`phageflow` command. Register it once per environment without touching
-its dependencies:
-
-```bash
-conda activate genomad  && pip install -e . --no-deps -q
-conda activate phold    && pip install -e . --no-deps -q
-conda activate bacphlip && pip install -e . --no-deps -q
-conda activate phageflow
-```
-
-### 5. Set up databases
-
-```bash
-# CheckV
+# CheckV (Nayfach et al. 2021)
 checkv download_database databases/checkv_db
 
-# Pharokka
+# Pharokka / PHROG (Bouras et al. 2023)
 install_databases.py -o databases/pharokka_db
 
-# geNomad
-conda activate genomad
+# geNomad — v1.9+ required (Camargo et al. 2023)
 genomad download-database databases/genomad_db
 
-# Phold
-conda activate phold
+# Phold (Bouras et al. 2024)
 phold install -d databases/phold_db
 
-# (Optional) Kraken2 — only for auto host detection
-conda activate phageflow
+# ABRicate databases — CARD + VFDB
+abricate --setupdb
+
+# (Optional) Kraken2 — only for auto host-detection mode
 kraken2-build --download-library bacteria --db databases/k2_db
 kraken2-build --build --db databases/k2_db
-
-conda activate phageflow
 ```
 
-### 6. Verify installation
+### 4. Verify installation
 
 ```bash
 phageflow check-tools
+```
+
+### 5. Copy configuration templates
+
+```bash
+phageflow config   # creates config/config.yaml
+phageflow samples  # creates config/samples.tsv
 ```
 
 ---
 
 ## Quick Start
 
+All commands run from the project root with `phageflow` active.
+No secondary environments are needed.
+
 ```bash
-# Copy config templates
-phageflow config   # creates config/config.yaml
-phageflow samples  # creates config/samples.tsv
-
-# Edit samples.tsv with your data, then run each module in order.
-# Stay in the phageflow environment — use conda run for tool-specific envs.
-
 conda activate phageflow
 
 phageflow qc --sample-id s1 \
-  --r1 data/s1_R1.fastq.gz --r2 data/s1_R2.fastq.gz
+  --r1 data/s1_R1.fastq.gz \
+  --r2 data/s1_R2.fastq.gz
 
 phageflow host-removal --sample-id s1 \
   --r1 results/01_qc/s1_R1.fastq.gz \
@@ -151,39 +153,28 @@ phageflow assembly --sample-id s1 \
   --r1 results/02_host_removal/s1_R1.fastq.gz \
   --r2 results/02_host_removal/s1_R2.fastq.gz
 
-conda run -n genomad phageflow viral-id --sample-id s1 \
+phageflow viral-id --sample-id s1 \
   --contigs results/03_assembly/combined/s1_contigs_nr.fasta
 
 phageflow quality --sample-id s1 \
   --virus-fna results/04_viral_id/s1_virus.fna
-
-# annotation-ready genomes are written per-candidate under:
-# results/05_quality/annotation_ready/phages/<candidate>.fasta
-# results/05_quality/annotation_ready/proviruses/<candidate>.fasta
-
-phageflow annotate --sample-id s1 \
-  --genome results/05_quality/annotation_ready/phages/<candidate>.fasta
-
-phageflow safety --sample-id s1 \
-  --genome results/05_quality/annotation_ready/phages/<candidate>.fasta
-
-conda run -n bacphlip phageflow lifecycle --sample-id s1 \
-  --genome results/05_quality/annotation_ready/phages/<candidate>.fasta
 ```
 
-> **Tip:** you never need to leave the `phageflow` environment.
-> Use `conda run -n <env>` for modules that require geNomad, Phold, or BACPHLIP.
+Annotation-ready genomes are written to:
+```
+results/05_quality/annotation_ready/phages/
+results/05_quality/annotation_ready/proviruses/
+```
 
 ---
 
 ## Configuration
 
-Edit `config/config.yaml` before running. All paths are relative to the
-pipeline working directory (project root by default).
+Edit `config/config.yaml` before running.
 
 ```yaml
 project: PhageFlow
-version: "3.2.0"
+version: "0.1.0"
 mode: purified_phage
 
 samples_file: config/samples.tsv
@@ -201,30 +192,24 @@ databases:
   pharokka: databases/pharokka_db
   genomad:  databases/genomad_db
   phold:    databases/phold_db
-  kraken2:  databases/k2_db    # only needed for Kraken2 host-removal mode
-
-envs:
-  main:      phageflow
-  genomad:   genomad
-  phold:     phold
-  lifecycle: bacphlip
+  kraken2:  databases/k2_db
 
 assembly:
   kmers:      "21,33,55,77,99,127"
-  min_length: 200              # contigs < N bp discarded post-assembly
+  min_length: 200
 
 genomad:
-  min_score:           0.7    # virus score threshold (Camargo 2023: 0.7 ≈ 97% precision)
-  min_virus_hallmarks: 0      # 0 = score-only mode; increase to require hallmark genes
+  min_score:           0.7
+  min_virus_hallmarks: 0
 
 checkv:
-  min_completeness:   50      # MQ threshold for annotation_ready/
-  min_viral_genes:    1       # LQ rescue: min viral genes → drafts/
-  length_rescue:      10000   # ND moderate rescue (≥10 kb + ≥1 gene) → drafts/
-  min_contig_bp:      1500    # global filter: contigs < N bp discarded
-  large_nd_rescue_bp: 30000   # ND large rescue (≥30 kb + ≥1 gene) → annotation_ready/
-  min_bin_rescue_bp:  30000   # draft co-bin rescue: bin total ≥ N bp → annotation_ready/
-  min_gene_density:   0.5     # viral genes/kb for density-based ND rescue → drafts/
+  min_completeness:   50
+  min_viral_genes:    1
+  length_rescue:      10000
+  min_contig_bp:      1500
+  large_nd_rescue_bp: 30000
+  min_bin_rescue_bp:  30000
+  min_gene_density:   0.5
 ```
 
 Override threads at runtime:
@@ -243,30 +228,6 @@ phageflow qc --sample-id s1 --r1 R1.fq --r2 R2.fq -t 8
 sample_id	r1	r2
 s1	/path/to/s1_R1.fastq.gz	/path/to/s1_R2.fastq.gz
 s2	/path/to/s2_R1.fastq.gz	/path/to/s2_R2.fastq.gz
-```
-
-- Supports `.fastq` and `.fastq.gz`
-- `sample_id` is the prefix for all output files
-- Lines starting with `#` are ignored
-
----
-
-## Environment setup
-
-| Environment | Tools    | Used by modules         |
-|-------------|----------|-------------------------|
-| `phageflow` | all core tools | qc, host-removal, assembly, quality, annotate, safety |
-| `genomad`   | geNomad  | viral-id                |
-| `phold`     | Phold    | annotate (step 2/2)     |
-| `bacphlip`  | BACPHLIP | lifecycle               |
-
-Register the CLI once in each environment (done at install, not per run):
-
-```bash
-conda activate genomad  && pip install -e . --no-deps -q
-conda activate phold    && pip install -e . --no-deps -q
-conda activate bacphlip && pip install -e . --no-deps -q
-conda activate phageflow
 ```
 
 ---
@@ -289,7 +250,7 @@ phageflow qc \
 | Parameter | Value | Rationale |
 |---|---|---|
 | Quality threshold | Q ≥ 20 | 99% base call accuracy |
-| Minimum read length | 75 bp | reliable k-mer coverage for assembly |
+| Minimum read length | 75 bp | reliable k-mer coverage |
 | Sliding window | 4 bp / Q20 | 3′ quality trimming (Bolger et al. 2014) |
 | Low-complexity filter | ≥ 30% | removes homopolymers (Roux et al. 2019) |
 | N base limit | 5 | removes low-confidence reads |
@@ -315,6 +276,10 @@ reports/01_qc/qc_summary.tsv
 
 **Host read removal** using bwa-mem2 alignment or Kraken2 classification.
 
+> **Requirement:** bwa-mem2 mode requires `samtools ≥ 1.15`.
+> Verify with `samtools --version`. If your environment has an older version,
+> update with `mamba install -n phageflow "samtools>=1.15"`.
+
 ```bash
 # Mode 1 — local FASTA (single file, folder, or path list)
 phageflow host-removal --sample-id s1 --r1 R1.fq.gz --r2 R2.fq.gz \
@@ -334,17 +299,9 @@ phageflow host-removal --sample-id s1 --r1 R1.fq.gz --r2 R2.fq.gz
 
 Mode priority: `--host-file` > `--accessions` > `--accessions-file` > Kraken2.
 
-**bwa-mem2 mode:** aligns all reads to the combined host reference; retains
-unmapped pairs (flag `-f 12 -F 256`).
-
-**Kraken2 mode:** classifies reads with `--confidence 0.2 --minimum-hit-groups 2`;
-retains unclassified reads + Viruses (taxid 10239). Particularly useful when
-no host reference is available or multiple unknown hosts are present.
-
 **Warnings emitted when:**
 - Phage fraction < 30% — likely wrong reference or heavy contamination
 - Surviving reads < 10,000 — assembly failure risk
-- Kraken2: < 30% unclassified — phage may already be in the database
 
 **Outputs:**
 ```
@@ -369,18 +326,13 @@ phageflow assembly \
 
 | Tool | Key flags | Rationale |
 |---|---|---|
-| metaSPAdes | `--meta --only-assembler` | handles variable coverage; skips error correction that collapses tail fiber variants at >200× (Roux et al. 2019) |
+| metaSPAdes | `--meta --only-assembler` | handles variable coverage; skips error correction that collapses tail fiber variants (Roux et al. 2019) |
 | MEGAHIT | `--no-mercy --min-count 2` | disables mercy k-mers; optimal for high-coverage phage (Li et al. 2015) |
 | cd-hit-est | `-c 1.00` | removes exact duplicates only; preserves biological SNP-level variants |
 
-Both assemblers use k-mer range `21–127` (configurable). Post-assembly
-length filter: contigs < `min_length` (default 200 bp) discarded.
-`contigs.fasta` is used rather than `scaffolds.fasta` to avoid artificial
-N-gaps that break ORF prediction.
-
 **Warnings emitted when:**
 - NR N50 < 5 kb — fragmented assembly
-- NR contigs > 100 — unusual for purified phage; possible contamination
+- NR contigs > 100 — unusual for purified phage
 
 **Outputs:**
 ```
@@ -397,29 +349,24 @@ reports/03_assembly/assembly_summary.tsv
 **Viral identification** with geNomad.
 
 ```bash
-conda run -n genomad phageflow viral-id \
-  --sample-id s1 \
+phageflow viral-id --sample-id s1 \
   --contigs results/03_assembly/combined/s1_contigs_nr.fasta
 ```
 
 geNomad classifies each contig as virus / plasmid / chromosome and detects
-integrated proviruses. Taxonomy is assigned at ICTV family/genus level; the
-most specific resolved rank is reported as `best_taxon`.
+integrated proviruses. Taxonomy is assigned at ICTV family/genus level.
 
-Key parameters (configurable in `config.yaml`):
+Key parameters:
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `min_score` | 0.7 | virus probability threshold; 0.7 ≈ 97% precision (Camargo 2023) |
+| `min_score` | 0.7 | virus probability threshold; ~97% precision (Camargo 2023) |
 | `min_virus_hallmarks` | 0 | 0 = score-only; increase to require hallmark gene hits |
-| `--splits` | 8 | parallel processing splits |
-| `--cleanup` | — | removes large intermediates, keeps summary + FASTA |
 
 **Warnings emitted when:**
 - 0 viral contigs — lower `genomad.min_score` in config
 - < 5% of contigs classified as viral — check host removal
-- Provirus detected — review lifecycle module output carefully
-- Best score < 0.7 — borderline classification; inspect contigs manually
+- Provirus detected — review annotation output carefully
 
 **Outputs:**
 ```
@@ -432,29 +379,28 @@ reports/04_viral_id/genomad_summary.tsv
 
 ### quality
 
-**Genome quality assessment, rescue, dereplication, co-binning, and
-selection** using CheckV + cd-hit-est + seqkit.
+**Genome quality assessment, rescue, dereplication, co-binning, and selection**
+using CheckV + cd-hit-est + seqkit.
 
 ```bash
-phageflow quality \
-  --sample-id s1 \
+phageflow quality --sample-id s1 \
   --virus-fna results/04_viral_id/s1_virus.fna
 ```
 
-**Pipeline (v3.2):**
+**Pipeline:**
 
 ```
 CheckV end-to-end
     ↓
 Tier selection + multi-path rescue
     ↓
-Draft co-bin rescue (NEW v3.2)
+Draft co-bin rescue
     ↓
-cd-hit-est 98% ANI dereplication (single-contigs only)
+cd-hit-est 98% ANI dereplication (single-contig only)
     ↓
 HQ co-binning by geNomad taxonomy
     ↓
-Taxonomy rename + seqkit -w 60 formatting
+Rename → seqkit -w 60
     ↓
 One FASTA per candidate genome
 ```
@@ -466,53 +412,65 @@ One FASTA per candidate genome
 | Complete or High-quality | `annotation_ready/` always | Nayfach 2021 |
 | MQ ≥ `min_completeness` (50%) | `annotation_ready/` | Nayfach 2021 |
 | MQ < 50% | `drafts/` | — |
-| LQ + ≥ `min_viral_genes` (1) OR ≥ `min_gene_density` (0.5 genes/kb) | `drafts/` | Roux 2019; Nayfach 2021 |
-| ND + ≥ `large_nd_rescue_bp` (30 kb) + ≥ 1 viral gene | `annotation_ready/` ⬆ | Camargo 2023; Adriaenssens 2020 |
+| LQ + ≥ `min_viral_genes` (1) OR density ≥ 0.5 genes/kb | `drafts/` | Roux 2019; Nayfach 2021 |
+| ND + ≥ `large_nd_rescue_bp` (30 kb) + ≥ 1 viral gene | `annotation_ready/` ↑ | Camargo 2023; Adriaenssens 2020 |
 | ND + ≥ `length_rescue` (10 kb) + ≥ 1 viral gene | `drafts/` | Nayfach 2021 |
-| ND + gene density ≥ 0.5 genes/kb | `drafts/` | Roux 2019 |
+| ND + density ≥ 0.5 genes/kb | `drafts/` | Roux 2019 |
 | < `min_contig_bp` (1,500 bp) | discarded | Roux 2019; Camargo 2023 |
 
-**Draft co-bin rescue** (`_cobin_draft_rescue`, new in v3.2):
-Contigs that individually fall below the completeness threshold but share
-the same geNomad taxonomy are grouped. If the combined bin reaches
-`min_bin_rescue_bp` (30 kb), it is promoted to `annotation_ready/` as a
-multi-FASTA for Pharokka `--meta`. This is the primary mechanism for
-recovering large fragmented phage genomes (Herelleviridae, Ackermannviridae)
-where each assembly fragment is legitimately MQ at low individual completeness.
+**Why ND ≥ 30 kb goes directly to `annotation_ready/`:** CheckV completeness
+relies on HMM profiles from database sequences. Large myoviruses
+(Herelleviridae >100 kb, Ackermannviridae >150 kb) without close database
+relatives are consistently ND regardless of actual completeness. In a purified
+phage preparation, a contig ≥ 30 kb with ≥ 1 viral gene is almost certainly
+phage. (Camargo et al. 2023; Adriaenssens & Brister 2017)
 
-> **Why ND ≥ 30 kb goes directly to `annotation_ready/`:** CheckV's
-> completeness estimation relies on HMM profiles derived from database
-> sequences. Large myoviruses (Herelleviridae >100 kb, Ackermannviridae
-> >150 kb) without close database relatives are consistently classified as
-> ND regardless of actual completeness. In a purified phage preparation,
-> a contig ≥ 30 kb with at least one viral gene is almost certainly phage.
+**Draft co-bin rescue:** Contigs that individually fall below the completeness
+threshold but share the same geNomad taxonomy are grouped. If the combined bin
+reaches `min_bin_rescue_bp` (30 kb), it is promoted to `annotation_ready/` as
+a multi-FASTA for Pharokka `--meta`. Confidence criteria for considering a
+bin a single phage genome:
 
-**Dereplication:** cd-hit-est at 0.98 ANI intra-sample (Turner et al. 2021
-ICTV species threshold = 0.95; 0.98 targets assembly artefacts, not distinct
-strains). Multi-contig bins bypass dereplication — they are unique by
-construction.
+1. Each contig independently classified as viral by geNomad ≥ 0.7 (~97% precision)
+2. All contigs share the same family-level taxonomy (common viral lineage)
+3. Combined bin length ≥ 30 kb (biologically meaningful for large myoviruses)
+4. At least 1 viral gene across the bin (viral marker confirmed)
 
-**Co-binning by taxonomy:** Single-contig HQ sequences sharing a geNomad
-taxon are grouped into a single multi-FASTA. Multi-contig bins already
-present (from draft rescue) are passed through unchanged to avoid incorrect
-re-grouping.
+*Limitation:* two co-purified phages of the same family would be incorrectly
+merged. This is rare in purified preparations and is detectable downstream via
+Pharokka annotation (unexpected gene content or unusual genome size).
 
-**Rename convention:**
-- Single contig: `{Family}_candidate_{NNN}.fasta`
-- Multi-contig bin: `{Family}_multicontig_{NNN}.fasta`
+**Dereplication:** cd-hit-est at 0.98 ANI intra-sample (Turner et al. 2021;
+ICTV species threshold = 0.95, so 0.98 targets assembly artefacts).
 
-Proviruses use CheckV's trimmed sequences from `proviruses.fna` (host
-flanks removed) and are placed under `annotation_ready/proviruses/`.
+**Naming convention:**
+
+All candidates — single-contig and multi-contig — follow the same pattern:
+
+```
+{Family}_candidate_{NNN}.fasta
+```
+
+FASTA headers:
+```
+Single  : >Herelleviridae_candidate_001
+Multi   : >Herelleviridae_candidate_002_ctg001
+          >Herelleviridae_candidate_002_ctg002
+```
+
+The `rename_map.tsv` records `n_contigs` for each candidate. Downstream
+annotation (Pharokka) auto-selects `--single` or `--meta` mode by counting
+sequences in the FASTA file.
 
 **Warnings emitted when:**
 - 0 HQ genomes + 0 draft bins promoted — lower `min_completeness` or check geNomad output
-- Best completeness < 50% — fragmented genome; lifecycle confidence reduced
+- Best completeness < 50% — fragmented genome; annotation confidence reduced
 - Host genes > 3 — check host-removal step
 - Max contamination > 5% — inspect `quality_summary.tsv`
 
 **Outputs:**
 ```
-results/05_quality/annotation_ready/phages/{candidate}.fasta   ← annotate input
+results/05_quality/annotation_ready/phages/{candidate}.fasta
 results/05_quality/annotation_ready/proviruses/{candidate}.fasta
 results/05_quality/drafts/{sample}_draft.fasta
 results/05_quality/{sample}/quality_summary.tsv
@@ -522,153 +480,33 @@ reports/05_quality/{sample}_rename_map.tsv
 
 ---
 
-### annotate
-
-**Structural and functional annotation** using Pharokka + Phold.
-
-```bash
-phageflow annotate \
-  --sample-id s1 \
-  --genome results/05_quality/annotation_ready/phages/<candidate>.fasta
-```
-
-**Step 1 — Pharokka** (Bouras et al. 2023, *Bioinformatics*):
-- Gene calling with PHANOTATE
-- Functional annotation against PHROG database
-- `--dnaapler all`: genome reorientation to terminase large subunit
-- Mode selected automatically: `--single` for one contig, `--meta` for
-  multi-contig genomes (fragmented assemblies, co-binned candidates)
-
-**Step 2 — Phold** (Bouras et al. 2024, *Bioinformatics*):
-- Structure-based annotation via ProstT5 protein language model +
-  Foldseek alignment to PHROGs
-- Upgrades hypothetical proteins that lack sequence homology
-- Invoked via `conda run -n phold` transparently
-
-**Outputs:**
-```
-results/06_annotation/{sample}/pharokka/{sample}.gbk
-results/06_annotation/{sample}/pharokka/{sample}.gff
-results/06_annotation/{sample}/pharokka/{sample}_cds_functions.tsv
-results/06_annotation/{sample}/phold/{sample}_phold.gbk   ← final GBK
-reports/06_annotation/annotation_summary.tsv
-```
-
-> Run `annotate` before `safety` — the safety module reads Pharokka's
-> CDS functions TSV for integrase detection.
-
----
-
-### safety
-
-**Biosafety screening** for phage therapy candidacy.
-
-```bash
-phageflow safety \
-  --sample-id s1 \
-  --genome results/05_quality/annotation_ready/phages/<candidate>.fasta
-```
-
-Three independent screens:
-
-| Screen | Tool | Database | Threshold |
-|---|---|---|---|
-| Antimicrobial resistance genes (ARGs) | abricate | CARD | 80% id / 80% cov |
-| Virulence factors (VFs) | abricate | VFDB | 80% id / 80% cov |
-| Integrase / lysogeny genes | Pharokka CDS TSV | PHROG categories | — |
-
-PHROG categories screened for lysogeny: `integration and excision`,
-`lysogeny`, `transcription regulation` (CI repressor, Cro).
-
-**Verdicts:**
-
-| Verdict | Condition |
-|---|---|
-| ✓ PASS | No ARG, no VF, no integrase detected |
-| ⚠ CAUTION | Integrase or VF detected — expert review required |
-| ✗ FAIL | ARG detected — exclude from therapeutic use |
-
-**Outputs:**
-```
-reports/07_safety/safety_summary.tsv
-reports/07_safety/{sample}_safety_details.tsv
-results/07_safety/{sample}_CARD.tsv
-results/07_safety/{sample}_VFDB.tsv
-```
-
----
-
-### lifecycle
-
-**Lifecycle prediction** (virulent / temperate) with BACPHLIP.
-
-```bash
-conda run -n bacphlip phageflow lifecycle \
-  --sample-id s1 \
-  --genome results/05_quality/annotation_ready/phages/<candidate>.fasta
-```
-
-BACPHLIP uses a random forest classifier trained on 62 lifestyle-associated
-HMM profiles derived from >1,000 manually curated phage genomes (Hockenberry
-& Wilke 2021, *PeerJ*). Profiles include integrases, CI repressors, Cro
-proteins, excisionases (temperate markers) and holins, endolysins, spanins
-(lytic markers). Reported accuracy: 98% on complete genomes; performance
-decreases for fragmented or highly novel sequences.
-
-| Score | Prediction | Implication |
-|---|---|---|
-| Virulent ≥ 0.9 | Confident lytic | Preferred for phage therapy |
-| Temperate ≥ 0.9 | Confident lysogen | Expert review required before therapeutic use |
-| Neither ≥ 0.9 | Ambiguous | Manual annotation review recommended; common for novel or fragmented genomes |
-
-PhageFlow cross-checks BACPHLIP output against integrase genes detected by
-the safety module. A conflict (BACPHLIP = Virulent + integrase detected)
-triggers a warning.
-
-**Outputs:**
-```
-results/08_lifecycle/{sample}.fasta.bacphlip
-reports/08_lifecycle/lifecycle_summary.tsv
-```
-
----
-
 ## Output structure
 
 ```
 results/
 ├── 01_qc/
-│   ├── {sample}_R1.fastq.gz          trimmed reads
+│   ├── {sample}_R1.fastq.gz
 │   └── {sample}_R2.fastq.gz
 ├── 02_host_removal/
-│   ├── {sample}_R1.fastq.gz          host-filtered reads
+│   ├── {sample}_R1.fastq.gz
 │   └── {sample}_R2.fastq.gz
 ├── 03_assembly/
-│   ├── spades/{sample}/              SPAdes working directory
-│   ├── megahit/{sample}/             MEGAHIT working directory
-│   └── combined/{sample}_contigs_nr.fasta   ← geNomad input
+│   ├── spades/{sample}/
+│   ├── megahit/{sample}/
+│   └── combined/{sample}_contigs_nr.fasta
 ├── 04_viral_id/
-│   ├── {sample}/                     geNomad working directory
-│   └── {sample}_virus.fna            ← CheckV input
-├── 05_quality/
-│   ├── annotation_ready/
-│   │   ├── phages/{candidate}.fasta  ← annotate / safety / lifecycle input
-│   │   └── proviruses/{candidate}.fasta
-│   ├── drafts/{sample}_draft.fasta   rescued contigs below HQ threshold
-│   └── {sample}/quality_summary.tsv
-├── 06_annotation/{sample}/
-│   ├── pharokka/                     .gbk .gff .tsv
-│   └── phold/                        *_phold.gbk  ← final annotation
-├── 07_safety/
-│   ├── {sample}_CARD.tsv
-│   └── {sample}_VFDB.tsv
-└── 08_lifecycle/
-    └── {sample}.fasta.bacphlip
+│   ├── {sample}/
+│   └── {sample}_virus.fna
+└── 05_quality/
+    ├── annotation_ready/
+    │   ├── phages/{Family}_candidate_{NNN}.fasta
+    │   └── proviruses/{Family}_candidate_{NNN}.fasta
+    ├── drafts/{sample}_draft.fasta
+    └── {sample}/quality_summary.tsv
 
 reports/
 ├── 01_qc/
-│   ├── {sample}_fastp.json
-│   ├── {sample}_fastp.html
+│   ├── {sample}_fastp.json / .html
 │   ├── *_fastqc.html
 │   ├── multiqc/multiqc_qc.html
 │   └── qc_summary.tsv
@@ -678,16 +516,9 @@ reports/
 │   └── assembly_summary.tsv
 ├── 04_viral_id/
 │   └── genomad_summary.tsv
-├── 05_quality/
-│   ├── checkv_summary.tsv
-│   └── {sample}_rename_map.tsv
-├── 06_annotation/
-│   └── annotation_summary.tsv
-├── 07_safety/
-│   ├── safety_summary.tsv
-│   └── {sample}_safety_details.tsv
-└── 08_lifecycle/
-    └── lifecycle_summary.tsv
+└── 05_quality/
+    ├── checkv_summary.tsv
+    └── {sample}_rename_map.tsv
 ```
 
 ---
@@ -701,7 +532,7 @@ set -euo pipefail
 conda activate phageflow
 
 CONFIG="config/config.yaml"
-SAMPLES=(s1 s2 s3 s4 uce01 uce02 uce03 uce04)
+SAMPLES=(s1 s2 s3 s4)
 HOST="/path/to/host.fasta"
 
 for SAMPLE in "${SAMPLES[@]}"; do
@@ -721,32 +552,16 @@ for SAMPLE in "${SAMPLES[@]}"; do
         --r1 "results/02_host_removal/${SAMPLE}_R1.fastq.gz" \
         --r2 "results/02_host_removal/${SAMPLE}_R2.fastq.gz"
 
-    conda run -n genomad phageflow viral-id -c "$CONFIG" \
-        --sample-id "$SAMPLE" \
+    phageflow viral-id -c "$CONFIG" --sample-id "$SAMPLE" \
         --contigs "results/03_assembly/combined/${SAMPLE}_contigs_nr.fasta"
 
     phageflow quality -c "$CONFIG" --sample-id "$SAMPLE" \
         --virus-fna "results/04_viral_id/${SAMPLE}_virus.fna"
 
-    # Iterate over all annotation-ready candidates for this sample
-    for GENOME in results/05_quality/annotation_ready/phages/*.fasta \
-                  results/05_quality/annotation_ready/proviruses/*.fasta; do
-        [[ -f "$GENOME" ]] || continue
-
-        phageflow annotate -c "$CONFIG" --sample-id "$SAMPLE" --genome "$GENOME"
-        phageflow safety  -c "$CONFIG" --sample-id "$SAMPLE" --genome "$GENOME"
-
-        conda run -n bacphlip phageflow lifecycle -c "$CONFIG" \
-            --sample-id "$SAMPLE" --genome "$GENOME"
-    done
 done
 
 echo "=== All samples done ==="
 ```
-
-> **Note on multi-contig candidates:** genomes produced by co-binning
-> (named `*_multicontig_*.fasta`) contain multiple sequences and are
-> automatically processed by Pharokka in `--meta` mode.
 
 ---
 
@@ -760,7 +575,7 @@ echo "=== All samples done ==="
 | Phold DB | current | annotate | `phold install -d databases/phold_db` |
 | CARD | bundled | safety | `abricate --setupdb` |
 | VFDB | bundled | safety | `abricate --setupdb` |
-| Kraken2 | optional | host-removal | see Kraken2 documentation |
+| Kraken2 | optional | host-removal | `kraken2-build --download-library bacteria --db databases/k2_db` |
 
 ---
 
@@ -777,7 +592,6 @@ If you use PhageFlow, please cite the underlying tools:
 - **CheckV** — Nayfach et al. (2021) *Nature Biotechnology* 39:578–585
 - **Pharokka** — Bouras et al. (2023) *Bioinformatics* 39:btac776
 - **Phold** — Bouras et al. (2024) *Bioinformatics*
-- **BACPHLIP** — Hockenberry & Wilke (2021) *PeerJ* 9:e11396
 - **CARD** — Alcock et al. (2023) *Nucleic Acids Research*
 - **VFDB** — Liu et al. (2022) *Nucleic Acids Research*
 
@@ -785,9 +599,9 @@ If you use PhageFlow, please cite the underlying tools:
 
 ## Authors
 
-Fausto Cabezas-Mera · fcabezasmera@utem.cl  
-Estefania Tisalema Guanopatin · etisalemag@correo.uss.cl  
-Antonella Nole  
+Fausto Cabezas-Mera · fcabezasmera@utem.cl
+Estefania Tisalema Guanopatin · etisalemag@correo.uss.cl
+Antonella Nole
 Dayra Valle
 
 PhageFlow is released under the MIT License.
