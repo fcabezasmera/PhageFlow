@@ -17,6 +17,7 @@ databases:
   pharokka: databases/pharokka_db
   genomad:  databases/genomad_db
   phold:    databases/phold_db
+  phynteny: databases/phynteny_db
   kraken2:  databases/k2_db
 
 envs:
@@ -39,4 +40,10 @@ checkv:
   min_contig_bp:      1500    # filtro global: contigs < N bp descartados
   large_nd_rescue_bp: 30000   # ND ≥ N bp + ≥1 gen viral → annotation_ready (no drafts)
   min_bin_rescue_bp:  30000   # suma total del bin de drafts ≥ N bp → annotation_ready
-  min_gene_density:   0.5 
+  min_gene_density:   0.5
+
+annotate:
+  phold_gpu:           true   # --foldseek_gpu; set false for --cpu fallback
+  phold_finetune:      true   # phage-finetuned ProstT5 model (recommended)
+  phold_batch_size:    1      # ProstT5 batch size; increase on GPU (e.g. 4-8)
+  phynteny_confidence: 0.7    # confidence threshold for Phynteny predictions

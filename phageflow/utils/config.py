@@ -48,7 +48,7 @@ def load_samples(tsv_path: Path) -> List[Sample]:
 @dataclass
 class AssemblyConfig:
     kmers:      str = "21,33,55,77,99,127"
-    min_length: int = 500
+    min_length: int = 200
 
 
 @dataclass
@@ -63,9 +63,18 @@ class CheckvConfig:
     min_viral_genes:    int   = 1
     length_rescue:      int   = 10_000
     min_contig_bp:      int   = 1_500
-    large_nd_rescue_bp: int   = 30_000  # ND ≥ N bp + ≥1 viral gene → annotation_ready/
-    min_bin_rescue_bp:  int   = 30_000  # draft bin ≥ N bp total → annotation_ready/
-    min_gene_density:   float = 0.5     # viral genes/kb — density-based rescue
+    large_nd_rescue_bp: int   = 30_000
+    min_bin_rescue_bp:  int   = 30_000
+    min_gene_density:   float = 0.5
+
+
+@dataclass
+class AnnotateConfig:
+    """Settings for Module 06 (Pharokka → Phold → Phynteny)."""
+    phold_gpu:           bool  = True   # --foldseek_gpu (False → --cpu)
+    phold_finetune:      bool  = True   # --finetune: phage-finetuned ProstT5
+    phold_batch_size:    int   = 1      # ProstT5 batch size (increase on GPU)
+    phynteny_confidence: float = 0.7   # confidence threshold (0.0–1.0)
 
 
 @dataclass
@@ -74,15 +83,13 @@ class DatabaseConfig:
     pharokka: Path           = Path("databases/pharokka_db")
     genomad:  Path           = Path("databases/genomad_db")
     phold:    Path           = Path("databases/phold_db")
+    phynteny: Path           = Path("databases/phynteny_db")
     kraken2:  Optional[Path] = None
 
 
 @dataclass
 class EnvConfig:
-    main:      str = "phageflow"
-    genomad:   str = "genomad"
-    phold:     str = "pholdENV"
-    lifecycle: str = "bacphlip_env"
+    main: str = "phageflow"
 
 
 @dataclass
@@ -100,6 +107,7 @@ class Config:
     assembly:  AssemblyConfig = field(default_factory=AssemblyConfig)
     genomad:   GenomadConfig  = field(default_factory=GenomadConfig)
     checkv:    CheckvConfig   = field(default_factory=CheckvConfig)
+    annotate:  AnnotateConfig = field(default_factory=AnnotateConfig)
 
     @property
     def results_dir(self) -> Path:
@@ -136,15 +144,13 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
         cfg.databases.pharokka = cfg.workdir / db.get("pharokka", str(cfg.databases.pharokka))
         cfg.databases.genomad  = cfg.workdir / db.get("genomad",  str(cfg.databases.genomad))
         cfg.databases.phold    = cfg.workdir / db.get("phold",    str(cfg.databases.phold))
+        cfg.databases.phynteny = cfg.workdir / db.get("phynteny", str(cfg.databases.phynteny))
         if "kraken2" in db:
             cfg.databases.kraken2 = cfg.workdir / db["kraken2"]
 
     if "envs" in raw:
         e = raw["envs"]
-        cfg.envs.main      = e.get("main",      cfg.envs.main)
-        cfg.envs.genomad   = e.get("genomad",   cfg.envs.genomad)
-        cfg.envs.phold     = e.get("phold",     cfg.envs.phold)
-        cfg.envs.lifecycle = e.get("lifecycle", cfg.envs.lifecycle)
+        cfg.envs.main = e.get("main", cfg.envs.main)
 
     if "assembly" in raw:
         a = raw["assembly"]
@@ -153,8 +159,7 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
 
     if "genomad" in raw:
         g = raw["genomad"]
-        cfg.genomad.min_score = float(g.get("min_score", cfg.genomad.min_score))
-        # Accept both "min_virus_hallmarks" (YAML key) and "min_hallmarks" (legacy)
+        cfg.genomad.min_score     = float(g.get("min_score", cfg.genomad.min_score))
         cfg.genomad.min_hallmarks = int(
             g.get("min_virus_hallmarks", g.get("min_hallmarks", cfg.genomad.min_hallmarks))
         )
@@ -168,5 +173,12 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
         cfg.checkv.large_nd_rescue_bp = int(  c.get("large_nd_rescue_bp", cfg.checkv.large_nd_rescue_bp))
         cfg.checkv.min_bin_rescue_bp  = int(  c.get("min_bin_rescue_bp",  cfg.checkv.min_bin_rescue_bp))
         cfg.checkv.min_gene_density   = float(c.get("min_gene_density",   cfg.checkv.min_gene_density))
+
+    if "annotate" in raw:
+        a = raw["annotate"]
+        cfg.annotate.phold_gpu           = bool( a.get("phold_gpu",           cfg.annotate.phold_gpu))
+        cfg.annotate.phold_finetune      = bool( a.get("phold_finetune",      cfg.annotate.phold_finetune))
+        cfg.annotate.phold_batch_size    = int(  a.get("phold_batch_size",    cfg.annotate.phold_batch_size))
+        cfg.annotate.phynteny_confidence = float(a.get("phynteny_confidence", cfg.annotate.phynteny_confidence))
 
     return cfg
