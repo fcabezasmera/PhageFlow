@@ -45,12 +45,18 @@ Multi-contig bin assembly — confidence criteria:
       1. Each contig independently classified as viral by geNomad (score ≥0.7),
          giving ~97% per-contig precision (Camargo et al. 2023).
       2. All contigs share the same geNomad family-level taxonomy, indicating
-         a common viral lineage.
+         a common viral lineage. Contigs without assigned taxonomy are treated
+         as individual candidates — absent taxonomy means insufficient evidence
+         for lineage inference (Camargo et al. 2023).
       3. Combined length ≥ min_bin_rescue_bp (30 kb) for draft rescue, or
-         co-binned at any combined length for HQ genomes.
+         co-binned at any combined length for MQ genomes.
       4. At least 1 viral gene across the bin (viral marker confirmed).
+    Complete and High-quality genomes that survive 98% ANI dereplication are
+    treated as individual candidates — they are genuinely distinct sequences
+    (Turner et al. 2021: ICTV species boundary = 95% ANI), so co-binning them
+    would risk merging genomes from different phage species.
     In a purified phage preparation, co-elution of two phages from the same
-    family is uncommon, making shared-taxonomy co-binning reliable.
+    family is uncommon, making shared-taxonomy co-binning reliable for MQ/LQ.
     Limitation: two co-purified phages of the same family would be merged.
     Downstream CheckV contamination and Pharokka annotation can reveal this.
     (Buttimer et al. 2020, Front Microbiol 11:710;
@@ -60,6 +66,8 @@ Draft co-bin rescue:
     Contigs individually below threshold sharing a geNomad taxonomy are grouped.
     If combined length ≥ min_bin_rescue_bp, the bin is promoted to
     annotation_ready/ for Pharokka --meta processing.
+    Contigs without geNomad taxonomy are kept as individual draft candidates —
+    they cannot be co-binned without evidence of shared viral lineage.
 
 cd-hit-est (Fu et al. 2012, Bioinformatics 28:3150–3152):
     -c 0.98: intra-sample dereplication at 98% ANI (single-contig only).
@@ -105,6 +113,12 @@ _CDHIT_N  = "8"      # word length (correct for ≥0.90 identity)
 # CheckV tier ranking (most to least confident)
 _TIER_ORDER = ["Complete", "High-quality", "Medium-quality", "Low-quality", "Not-determined"]
 
+# Tiers that represent genuinely complete or near-complete genomes —
+# these must NOT be co-binned after 98% ANI dereplication because surviving
+# sequences are distinct (≥2% divergence > ICTV species boundary of 95% ANI;
+# Turner et al. 2021). Co-binning would risk merging different phage species.
+_HIGH_CONFIDENCE_TIERS = frozenset({"Complete", "High-quality"})
+
 
 # ── Data structure ────────────────────────────────────────────────────────────
 
@@ -147,9 +161,9 @@ def run(
     --------
     CheckV end-to-end
         → tier selection + rescue paths
-        → draft co-bin rescue          (multi-contig bins from drafts/)
+        → draft co-bin rescue          (multi-contig bins from drafts/, taxonomy-confirmed only)
         → cd-hit-est 98% ANI           (single-contig HQ only)
-        → HQ co-binning by geNomad taxon
+        → MQ co-binning by geNomad taxon  (Complete/HQ kept as individual candidates)
         → rename + seqkit -w 60
         → one FASTA per candidate genome
 
@@ -189,8 +203,13 @@ def run(
         f"ND large: ≥{cfg.checkv.large_nd_rescue_bp:,} bp → annotation_ready/"
     )
     log_info(
-        f"  Draft co-bin rescue: ≥{cfg.checkv.min_bin_rescue_bp:,} bp → annotation_ready/  |  "
+        f"  Draft co-bin rescue: ≥{cfg.checkv.min_bin_rescue_bp:,} bp → annotation_ready/ "
+        f"(taxonomy-confirmed only; Camargo 2023, Buttimer 2020)  |  "
         f"cd-hit-est {_CDHIT_ID} ANI  (Turner et al. 2021)"
+    )
+    log_info(
+        "  Complete/HQ genomes: individual candidates after dereplication "
+        "(Turner et al. 2021: 95% ANI species boundary)"
     )
 
     if not cfg.databases.checkv.exists():
@@ -234,11 +253,14 @@ def run(
             summary, hq_records, draft_records = _parse_checkv(
                 sample_id, qfile, seqs, prov_seqs, cfg.checkv,
             )
-            # Group draft contigs by geNomad taxonomy; promote bins ≥ threshold
+            # Group draft contigs by geNomad taxonomy (taxonomy-confirmed only);
+            # promote bins ≥ threshold. Contigs without taxonomy remain as
+            # individual drafts — cannot infer shared lineage (Camargo 2023).
             promoted_bins, draft_records = _cobin_draft_rescue(
                 draft_records, tax_map, sample_id, cfg.checkv.min_bin_rescue_bp,
             )
             summary["rescued_draft_bins"] = len(promoted_bins)
+            # Always create draft FASTA (empty file is valid output)
             _write_fasta_records(draft_records, draft_dir / f"{sample_id}_draft.fasta")
             log_ok("  [CheckV] genome selection complete")
         else:
@@ -264,9 +286,12 @@ def run(
             log_ok(f"  [draft rescue] {len(promoted_bins)} bin(s) promoted to annotation pool")
         progress.advance(task)
 
-        # 4/4 — Co-binning by taxon + rename + seqkit format
+        # 4/4 — Co-binning by taxon (MQ only) + rename + seqkit format
         progress.update(task, description="[4/4] seqkit   — co-binning, renaming & formatting")
         if hq_records:
+            # Co-bin only MQ records sharing a taxonomy (Camargo 2023, Buttimer 2020).
+            # Complete/HQ records that survived dereplication are genuinely distinct
+            # sequences and must remain as individual candidates (Turner et al. 2021).
             hq_records = _cobin_by_taxon(hq_records, tax_map, sample_id)
             rename_map = _build_rename_map(hq_records, tax_map)
             _save_rename_map(rename_map, rpt_dir / f"{sample_id}_rename_map.tsv")
@@ -444,7 +469,7 @@ def _parse_checkv(sample_id, qfile, seqs, prov_seqs, chkv):
                         )
                         draft_records.append(record)
                         rescued_nd += 1
-                    elif gene_density >= chkv.min_gene_density and clen_int >= chkv.min_contig_bp:
+                    elif gene_density >= chkv.min_gene_density:
                         log_warn(
                             f"  [density-ND rescue] {cid} — "
                             f"density={gene_density:.2f}/kb → drafts/"
@@ -492,24 +517,41 @@ def _cobin_draft_rescue(draft_records, tax_map, sample_id, min_bin_rescue_bp):
     """
     Promote draft bins ≥ min_bin_rescue_bp to annotation_ready/.
 
-    Confidence that a bin represents a single phage genome:
-      - Each contig independently classified by geNomad ≥0.7 (~97% precision)
-      - Shared taxonomy implies a common viral lineage
-      - In purified preparations, same-family co-purification is uncommon
-      - Downstream CheckV contamination and Pharokka annotation will reveal
-        any incorrectly merged genomes
+    Confidence criteria for treating a bin as a single phage genome:
+      - Each contig independently classified by geNomad ≥0.7 (~97% precision;
+        Camargo et al. 2023)
+      - All contigs share the same geNomad family-level taxonomy → common
+        viral lineage (Buttimer et al. 2020; Adriaenssens et al. 2020)
+      - Combined length ≥ min_bin_rescue_bp (default 30 kb)
+      - At least 1 viral gene across the bin
+
+    CORRECTION (Camargo et al. 2023): Contigs without assigned geNomad taxonomy
+    are kept as individual draft candidates. Absent taxonomy means insufficient
+    evidence to infer a shared lineage — grouping such contigs would violate
+    the shared-taxonomy criterion and risk merging unrelated phages.
 
     References: Buttimer et al. 2020, Front Microbiol;
                 Adriaenssens et al. 2020, Viruses 12:955;
                 Camargo et al. 2023, Nat Biotechnol
     """
     taxon_buckets: dict[str, list[ContigRecord]] = defaultdict(list)
+    no_taxon:      list[ContigRecord]             = []
+
     for rec in draft_records:
-        taxon = tax_map.get(rec.contig_id, "Unknown")
+        taxon = tax_map.get(rec.contig_id)
+        if not taxon:
+            # No geNomad taxonomy → cannot infer shared viral lineage.
+            # Keep as individual draft candidate (Camargo et al. 2023).
+            log_info(
+                f"  [draft-bin rescue] {rec.contig_id} sin taxonomía asignada → "
+                "candidato individual (Camargo et al. 2023)"
+            )
+            no_taxon.append(rec)
+            continue
         taxon_buckets[taxon].append(rec)
 
     promoted:  list[ContigRecord] = []
-    remaining: list[ContigRecord] = []
+    remaining: list[ContigRecord] = list(no_taxon)
 
     for taxon, records in taxon_buckets.items():
         total_len = sum(r.length_bp for r in records)
@@ -584,18 +626,56 @@ def _dereplicate(records, tmp_dir, sample_id, rpt_dir, threads, force):
 
 def _cobin_by_taxon(records, tax_map, sample_id):
     """
-    Group single-contig HQ records sharing a geNomad taxon into multi-contig bins.
-    Multi-contig bins already present pass through unchanged.
+    Group MQ single-contig records sharing a geNomad taxon into multi-contig bins.
+
+    SCIENTIFIC RATIONALE FOR TIER RESTRICTION:
+        Complete and High-quality records that survived 98% ANI dereplication
+        are genuinely distinct sequences (≥2% genome-wide divergence), exceeding
+        the ICTV inter-species boundary of 95% ANI (Turner et al. 2021).
+        Co-binning them would risk merging genomes from different phage species.
+        Only Medium-quality records (confirmed by CheckV to be below completeness
+        threshold) can represent fragments of the same phage genome and are
+        eligible for taxonomy-based co-binning.
+        (Nayfach et al. 2021, Nat Biotechnol; Turner et al. 2021, Arch Virol)
+
+    CORRECTION (Camargo et al. 2023): Records without assigned geNomad taxonomy
+    are treated as individual candidates — absent taxonomy means insufficient
+    evidence for a common viral lineage and cannot justify co-binning.
+
+    Multi-contig bins already present (from draft rescue) pass through unchanged.
     """
     already_multi = [r for r in records if r.is_multicontig]
     singles       = [r for r in records if not r.is_multicontig]
 
+    # Complete/HQ: never co-bin — each is an independent genome candidate.
+    # (Turner et al. 2021: ≥2% ANI divergence = different species)
+    high_conf_singles = [r for r in singles if r.quality_tier in _HIGH_CONFIDENCE_TIERS]
+
+    # MQ (and any other non-Complete/HQ): eligible for co-binning by shared taxonomy.
+    mq_singles = [r for r in singles if r.quality_tier not in _HIGH_CONFIDENCE_TIERS]
+
     taxon_buckets: dict[str, list[ContigRecord]] = defaultdict(list)
-    for rec in singles:
-        taxon = tax_map.get(rec.contig_id, "Unknown")
+    no_taxon:      list[ContigRecord]             = []
+
+    for rec in mq_singles:
+        taxon = tax_map.get(rec.contig_id)
+        if not taxon:
+            # No taxonomy assigned → cannot infer shared lineage (Camargo 2023).
+            log_info(
+                f"  [co-bin] {rec.contig_id} sin taxonomía → candidato individual"
+            )
+            no_taxon.append(rec)
+            continue
         taxon_buckets[taxon].append(rec)
 
-    result = list(already_multi)
+    # Start result with multi-contig bins and high-confidence singles
+    result = list(already_multi) + list(high_conf_singles) + list(no_taxon)
+
+    if high_conf_singles:
+        log_info(
+            f"  [co-bin] {len(high_conf_singles)} Complete/HQ genome(s) mantenidos como "
+            "candidatos individuales (Turner et al. 2021: límite de especie 95% ANI)"
+        )
 
     for taxon, recs in taxon_buckets.items():
         if len(recs) == 1:
@@ -604,7 +684,7 @@ def _cobin_by_taxon(records, tax_map, sample_id):
             total_len = sum(r.length_bp for r in recs)
             total_vgn = sum(r.viral_genes for r in recs)
             log_info(
-                f"  [co-bin] {taxon}: {len(recs)} HQ contigs "
+                f"  [co-bin] {taxon}: {len(recs)} MQ contigs "
                 f"({total_len:,} bp, {total_vgn} viral genes) → multi-contig candidate"
             )
             bin_id = "__bin__" + "||".join(r.contig_id for r in recs)
@@ -645,13 +725,13 @@ def _build_rename_map(records, tax_map):
     for rec in records:
         if rec.is_multicontig:
             taxon = (
-                tax_map.get(rec.sub_records[0].contig_id, "Unknown")
+                tax_map.get(rec.sub_records[0].contig_id) or "Unknown"
                 if rec.sub_records else "Unknown"
             )
             n_ctg    = len(rec.sub_records)
             orig_ids = ",".join(r.contig_id for r in rec.sub_records)
         else:
-            taxon    = tax_map.get(rec.contig_id, "Unknown")
+            taxon    = tax_map.get(rec.contig_id) or "Unknown"
             n_ctg    = 1
             orig_ids = rec.contig_id
 
@@ -746,7 +826,7 @@ def _load_genomad_taxonomy(tsv):
                 parts     = line.strip().split("\t")
                 cid       = parts[id_idx] if id_idx < len(parts) else ""
                 cid_clean = cid.split("|")[0]
-                taxon     = "Unknown"
+                taxon     = None   # None = no taxonomy assigned
                 if 0 <= tax_idx < len(parts):
                     raw    = parts[tax_idx].strip()
                     levels = [
@@ -757,10 +837,14 @@ def _load_genomad_taxonomy(tsv):
                     ]
                     if levels:
                         taxon = levels[-1]
-                taxon = (
-                    taxon.replace(" ", "_").replace("/", "_")
-                         .replace("\\", "_").replace(":", "").replace(";", "")
-                )
+                if taxon:
+                    taxon = (
+                        taxon.replace(" ", "_").replace("/", "_")
+                             .replace("\\", "_").replace(":", "").replace(";", "")
+                    )
+                # Store None explicitly for unclassified contigs — callers
+                # use `tax_map.get(cid)` and check for None/falsy to detect
+                # absence of taxonomy (Camargo et al. 2023).
                 tax_map[cid_clean] = taxon
                 if cid != cid_clean:
                     tax_map[cid] = taxon
@@ -810,8 +894,8 @@ def _load_fasta(path):
 
 
 def _write_fasta_records(records, out_path):
-    if not records:
-        return
+    """Write single-contig records to FASTA. Always creates the file,
+    even if records is empty (empty file = valid output indicating no drafts)."""
     with open(out_path, "w") as f:
         for rec in records:
             if rec.sequence and not rec.is_multicontig:
