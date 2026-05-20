@@ -33,4 +33,10 @@ genomad:
   min_score: 0.7
 
 checkv:
-  min_completeness: 50
+  min_completeness:   50      # umbral MQ para annotation_ready
+  min_viral_genes:    1       # rescate LQ: mín. genes virales → drafts/
+  length_rescue:      10000   # rescate ND moderado (10kb + ≥1 gen viral) → drafts/
+  min_contig_bp:      1500    # filtro global: contigs < N bp descartados
+  large_nd_rescue_bp: 30000   # ND ≥ N bp + ≥1 gen viral → annotation_ready (no drafts)
+  min_bin_rescue_bp:  30000   # suma total del bin de drafts ≥ N bp → annotation_ready
+  min_gene_density:   0.5 

@@ -59,17 +59,13 @@ class GenomadConfig:
 
 @dataclass
 class CheckvConfig:
-    min_completeness: float = 50.0
-    # ── nuevos parámetros (v3.1) ──────────────────────────────────────────────
-    # Rescate Low-quality: mínimo de genes virales para promover a drafts/
-    # (Nayfach et al. 2021, Nat Biotechnol 39:578; Roux et al. 2019, eLife)
-    min_viral_genes:  int   = 1
-    # Rescate Not-determined: longitud mínima para considerar un contig ND
-    # como potencial fago grande (Camargo et al. 2023, Nat Biotechnol)
-    length_rescue:    int   = 10_000
-    # Filtro de longitud mínima por contig viral antes de cualquier análisis
-    # (Roux et al. 2019; Camargo et al. 2023 usan 1 kb en geNomad)
-    min_contig_bp:    int   = 1_500
+    min_completeness:   float = 50.0
+    min_viral_genes:    int   = 1
+    length_rescue:      int   = 10_000
+    min_contig_bp:      int   = 1_500
+    large_nd_rescue_bp: int   = 30_000  # ND ≥ N bp + ≥1 gen viral → annotation_ready
+    min_bin_rescue_bp:  int   = 30_000  # bin de drafts ≥ N bp → annotation_ready
+    min_gene_density:   float = 0.5     # genes virales/kb — rescate por densidad
 
 
 @dataclass
@@ -162,9 +158,13 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
 
     if "checkv" in raw:
         c = raw["checkv"]
-        cfg.checkv.min_completeness = float(c.get("min_completeness", cfg.checkv.min_completeness))
-        cfg.checkv.min_viral_genes  = int(  c.get("min_viral_genes",  cfg.checkv.min_viral_genes))
-        cfg.checkv.length_rescue    = int(  c.get("length_rescue",    cfg.checkv.length_rescue))
-        cfg.checkv.min_contig_bp    = int(  c.get("min_contig_bp",    cfg.checkv.min_contig_bp))
+        cfg.checkv.min_completeness   = float(c.get("min_completeness",   cfg.checkv.min_completeness))
+        cfg.checkv.min_viral_genes    = int(  c.get("min_viral_genes",    cfg.checkv.min_viral_genes))
+        cfg.checkv.length_rescue      = int(  c.get("length_rescue",      cfg.checkv.length_rescue))
+        cfg.checkv.min_contig_bp      = int(  c.get("min_contig_bp",      cfg.checkv.min_contig_bp))
+        cfg.checkv.large_nd_rescue_bp = int(  c.get("large_nd_rescue_bp", cfg.checkv.large_nd_rescue_bp))
+        cfg.checkv.min_bin_rescue_bp  = int(  c.get("min_bin_rescue_bp",  cfg.checkv.min_bin_rescue_bp))
+        cfg.checkv.min_gene_density   = float(c.get("min_gene_density",   cfg.checkv.min_gene_density))
+        
 
     return cfg
