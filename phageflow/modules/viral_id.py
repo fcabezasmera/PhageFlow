@@ -344,7 +344,7 @@ def _print_completion_panel(
         title=f"[bold cyan]Viral-id complete — {sample_id}[/bold cyan]",
         border_style="cyan",
         padding=(0, 2),
-        width=72,
+        width=90,
     ))
 
 
