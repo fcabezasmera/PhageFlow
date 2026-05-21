@@ -4,8 +4,8 @@ Goal: maximize recovery of Complete and High-quality phage genomes.
 
 Tools:
     CheckV v1.0+ (Nayfach et al. 2021, Nature Biotechnology 39:578)
-    mash v2.3   (Ondov et al. 2016, Genome Biology 17:132)   -- large contigs
-    cd-hit-est  (Fu et al. 2012, Bioinformatics 28:3150)     -- small contigs
+    mash v2.3   (Ondov et al. 2016, Genome Biology 17:132)   -- all contigs when available
+    cd-hit-est  (Fu et al. 2012, Bioinformatics 28:3150)     -- fallback only
     seqkit      (Shen et al. 2016, PLoS ONE 11:e0163962)
 
 Output structure (per-sample folders):
@@ -17,19 +17,25 @@ Output structure (per-sample folders):
     Ackermannviridae_candidate_001).
 
 Dereplication strategy:
-    cd-hit-est is unreliable for contigs >= 50kb: the internal alignment
-    band-width cannot accommodate the many small indels that arise between
-    SPAdes and MEGAHIT assemblies of the same genome distributed across
-    hundreds of kilobases (Fu et al. 2012).
+    mash is used for ALL contig sizes when available.
+    Rationale: bacteriophage genomes are frequently circular. Different
+    assemblers (SPAdes, MEGAHIT) linearize the same circular genome at
+    different positions, producing circular permutations. cd-hit-est uses
+    linear alignment and cannot detect permutations: individual HSPs each
+    cover only a fraction of the sequence, failing the -aS threshold even
+    when combined coverage is 100%. Inoviridae (ssDNA, ~6 kb) is the
+    canonical example, but the same applies to any circular phage genome.
+    mash computes MinHash distances from k-mer composition, which is
+    invariant to rotation — two permutations of the same circular sequence
+    have distance ≈ 0 and are correctly clustered (Ondov et al. 2016).
 
-    Threshold: _LARGE_CONTIG_BP = 50,000bp
-        < 50kb  -> cd-hit-est at 98% ANI  (-c 0.98, -aS 0.85)
-        >= 50kb -> mash sketch + mash dist, cluster at distance < 0.02
-                   (= ANI > 98%; Turner et al. 2021, Arch Virol 166:2633)
+    Threshold: _MASH_ANI_THRESH = 0.02 (= ANI > 98%; Turner et al. 2021,
+    Arch Virol 166:2633)
 
-    mash uses MinHash sketches for distance estimation and handles
-    large-genome comparisons correctly regardless of indel distribution.
-    Falls back to cd-hit-est if mash is not in PATH.
+    Fallback (mash not in PATH): cd-hit-est at 98% ANI for all sizes.
+    A _LARGE_CONTIG_BP split (50 kb) is applied only in the cd-hit-est
+    fallback because cd-hit-est's alignment band cannot reliably span
+    large-genome indels between assemblers (Fu et al. 2012).
 
 Taxonomy path:
     Reads genomad_tax_tsv from viral-id's genomad_summary.tsv.
@@ -73,10 +79,12 @@ _CDHIT_ID = "0.98"
 _CDHIT_AS = "0.85"
 _CDHIT_N  = "8"
 
-# Dereplication strategy threshold
-_LARGE_CONTIG_BP  = 50_000   # >= this -> mash; < this -> cd-hit-est
-_MASH_ANI_THRESH  = 0.02     # distance < 0.02 = ANI > 98%
-_MASH_SKETCH_SIZE = "10000"  # MinHash sketch size (default 1000 insufficient for large genomes)
+# Dereplication thresholds
+# _LARGE_CONTIG_BP is only used in the cd-hit-est FALLBACK path.
+# When mash is available it is NOT used — mash handles all sizes uniformly.
+_LARGE_CONTIG_BP  = 50_000   # cd-hit-est fallback only: >= this -> wider band
+_MASH_ANI_THRESH  = 0.02     # distance < 0.02 = ANI > 98% (Turner et al. 2021)
+_MASH_SKETCH_SIZE = "10000"  # MinHash sketch size
 
 _TIER_ORDER = [
     "Complete", "High-quality", "Medium-quality", "Low-quality", "Not-determined"
@@ -151,9 +159,12 @@ def run(
         f"  Rescue  : LQ >=1 gene | ND >={cfg.checkv.length_rescue:,}bp -> drafts/ | "
         f"ND >={cfg.checkv.large_nd_rescue_bp:,}bp -> annotation_ready/"
     )
+
+    import shutil as _sh
+    _dedup_tool = "mash" if _sh.which("mash") else "cd-hit-est (fallback)"
     log_info(
-        f"  Dedup   : <{_LARGE_CONTIG_BP//1000}kb -> cd-hit-est {_CDHIT_ID} ANI | "
-        f">={_LARGE_CONTIG_BP//1000}kb -> mash dist (Ondov et al. 2016)"
+        f"  Dedup   : {_dedup_tool} {_MASH_ANI_THRESH*100:.0f}% dist threshold "
+        f"(all sizes, circular-safe) | Ondov et al. 2016"
     )
     log_info(
         f"  Co-bin  : >=30kb shared-taxonomy drafts -> annotation_ready/ | "
@@ -220,14 +231,10 @@ def run(
             )
         progress.advance(task)
 
-        # 3/4 -- Dereplication (size-aware: mash for large, cd-hit-est for small)
+        # 3/4 -- Dereplication (mash for all sizes; cd-hit-est fallback)
         progress.update(
             task,
-            description=(
-                f"[3/4] dedup    -- "
-                f"mash (>={_LARGE_CONTIG_BP//1000}kb) + "
-                f"cd-hit-est (<{_LARGE_CONTIG_BP//1000}kb)"
-            ),
+            description="[3/4] dedup    -- mash all-size (circular-safe)",
         )
         if hq_records:
             hq_records, n_before, n_after = _dereplicate(
@@ -507,7 +514,7 @@ def _cobin_draft_rescue(draft_records, tax_map, sample_id, min_bin_rescue_bp):
     return promoted, remaining
 
 
-# -- Step 3: Size-aware dereplication ------------------------------------------
+# -- Step 3: Dereplication (mash for all sizes; cd-hit-est fallback) -----------
 
 def _dereplicate(
     records: list[ContigRecord],
@@ -518,33 +525,54 @@ def _dereplicate(
     force: bool,
 ) -> tuple[list[ContigRecord], int, int]:
     """
-    Dereplicate HQ single-contig genomes using size-appropriate tools.
+    Dereplicate HQ single-contig genomes.
 
-    < 50kb  : cd-hit-est (fast, accurate for short sequences)
-    >= 50kb : mash (MinHash sketch distance, correct for large genomes)
-              Falls back to cd-hit-est if mash not in PATH.
+    Strategy (in priority order):
+    1. mash (all sizes) — preferred when mash is in PATH.
+       mash computes distances from k-mer composition (MinHash sketches),
+       which is invariant to sequence orientation and starting position.
+       This correctly handles circular phage genomes whose linearizations
+       by SPAdes and MEGAHIT begin at different positions (circular
+       permutations). cd-hit-est cannot detect these because individual
+       HSPs each cover only a fraction of the sequence.
+       Reference: Ondov et al. (2016) Genome Biology 17:132.
 
-    Both thresholds target 98% ANI (distance 0.02), above the ICTV species
-    boundary of 95% (Turner et al. 2021), to remove assembly duplicates
-    while preserving biological strain diversity.
+    2. cd-hit-est (fallback when mash not in PATH) — split by size:
+       < _LARGE_CONTIG_BP (50 kb): standard parameters.
+       >= _LARGE_CONTIG_BP: wider alignment band (-band 500).
+       Both at 98% ANI (Turner et al. 2021, Arch Virol 166:2633).
+       WARNING: cd-hit-est will miss circular permutations.
+
+    Both target distance < 0.02 = ANI > 98%, above the ICTV species
+    boundary of 95%, to remove assembly duplicates while preserving
+    biological strain diversity.
     """
     n_before = len(records)
     if n_before <= 1:
         return records, n_before, n_before
 
-    small = [r for r in records if r.length_bp <  _LARGE_CONTIG_BP]
-    large = [r for r in records if r.length_bp >= _LARGE_CONTIG_BP]
+    import shutil as _sh
+    if _sh.which("mash"):
+        log_info(
+            "  [dedup] using mash for all sizes (circular permutation-safe)"
+        )
+        result = _mash_dereplicate(records, tmp_dir, sample_id, rpt_dir)
+    else:
+        log_warn(
+            "  [dedup] mash not found -- falling back to cd-hit-est. "
+            "Circular permutations (e.g. Inoviridae) may NOT be deduplicated. "
+            "Install mash: mamba install -n phageflow bioconda::mash"
+        )
+        small = [r for r in records if r.length_bp <  _LARGE_CONTIG_BP]
+        large = [r for r in records if r.length_bp >= _LARGE_CONTIG_BP]
+        result = (
+            _cdhit_dereplicate(small, tmp_dir, sample_id, rpt_dir, threads)
+            if len(small) > 1 else small
+        ) + (
+            _cdhit_dereplicate_large(large, tmp_dir, sample_id, rpt_dir, threads)
+            if len(large) > 1 else large
+        )
 
-    derep_small = (
-        _cdhit_dereplicate(small, tmp_dir, sample_id, rpt_dir, threads)
-        if len(small) > 1 else small
-    )
-    derep_large = (
-        _mash_dereplicate(large, tmp_dir, sample_id, rpt_dir)
-        if len(large) > 1 else large
-    )
-
-    result = derep_small + derep_large
     return result, n_before, len(result)
 
 
@@ -555,7 +583,7 @@ def _cdhit_dereplicate(
     rpt_dir: Path,
     threads: int,
 ) -> list[ContigRecord]:
-    """cd-hit-est dereplication for contigs < 50kb."""
+    """cd-hit-est dereplication for contigs < 50kb (fallback only)."""
     if len(records) <= 1:
         return records
 
@@ -581,6 +609,40 @@ def _cdhit_dereplicate(
     return [r for r in records if r.contig_id in rep_ids]
 
 
+def _cdhit_dereplicate_large(
+    records: list[ContigRecord],
+    tmp_dir: Path,
+    sample_id: str,
+    rpt_dir: Path,
+    threads: int,
+) -> list[ContigRecord]:
+    """cd-hit-est dereplication for contigs >= 50kb (fallback only, wider band)."""
+    if len(records) <= 1:
+        return records
+
+    tmp_in  = tmp_dir / f"{sample_id}_large_raw.fasta"
+    tmp_out = tmp_dir / f"{sample_id}_large_derep.fasta"
+    _write_fasta_records(records, tmp_in)
+
+    try:
+        run_silent([
+            "cd-hit-est",
+            "-i", str(tmp_in), "-o", str(tmp_out),
+            "-c", _CDHIT_ID, "-aS", _CDHIT_AS,
+            "-G", "0", "-n", _CDHIT_N, "-d", "0",
+            "-sc", "1", "-T", str(threads), "-M", "8000",
+            "-band", "500",   # wider band for large sequences
+        ], log_file=rpt_dir / f"{sample_id}_cdhit_large.log")
+    except Exception as e:
+        log_warn(f"  [cd-hit-est] large contig dedup warning: {e}")
+        return records
+    finally:
+        Path(str(tmp_out) + ".clstr").unlink(missing_ok=True)
+
+    rep_ids = set(_load_fasta(tmp_out).keys())
+    return [r for r in records if r.contig_id in rep_ids]
+
+
 def _mash_dereplicate(
     records: list[ContigRecord],
     tmp_dir: Path,
@@ -588,50 +650,29 @@ def _mash_dereplicate(
     rpt_dir: Path,
 ) -> list[ContigRecord]:
     """
-    mash-based dereplication for contigs >= 50kb.
+    mash-based dereplication for ALL contig sizes.
 
-    mash sketch -i sketches each sequence independently in the multi-FASTA.
+    mash sketch -i sketches each sequence from the multi-FASTA independently.
     mash dist sketch.msh sketch.msh gives all pairwise distances.
-    Union-Find clusters sequences with distance < 0.02 (ANI > 98%);
+    Union-Find clusters sequences with distance < _MASH_ANI_THRESH (0.02 = ANI > 98%);
     the longest representative is kept from each cluster.
 
-    Falls back to cd-hit-est if mash is not in PATH (with warning).
+    Why mash for all sizes (including small phages like Inoviridae ~6 kb):
+        mash distance = 1 - Jaccard(k-mer sets), computed from MinHash sketches.
+        k-mer composition is invariant to the starting position of a circular
+        sequence linearization. Two SPAdes/MEGAHIT assemblies of the same
+        circular phage genome linearized at different positions share all k-mers
+        (ignoring assembly artifacts), yielding distance ≈ 0.
+        cd-hit-est uses linear alignment and fails for circular permutations:
+        each HSP covers only a fraction of the sequence, failing -aS thresholds.
 
     Reference: Ondov et al. (2016) Genome Biology 17:132.
     """
-    import shutil as _sh
-    if not _sh.which("mash"):
-        log_warn(
-            "  [mash] not found in PATH -- falling back to cd-hit-est for "
-            f"large contigs (>= {_LARGE_CONTIG_BP//1000}kb). "
-            "Install with: mamba install -n phageflow bioconda::mash"
-        )
-        # cd-hit-est fallback with a wider band for large sequences
-        tmp_in  = tmp_dir / f"{sample_id}_large_raw.fasta"
-        tmp_out = tmp_dir / f"{sample_id}_large_derep.fasta"
-        _write_fasta_records(records, tmp_in)
-        try:
-            run_silent([
-                "cd-hit-est",
-                "-i", str(tmp_in), "-o", str(tmp_out),
-                "-c", _CDHIT_ID, "-aS", _CDHIT_AS,
-                "-G", "0", "-n", _CDHIT_N, "-d", "0",
-                "-sc", "1", "-T", "4", "-M", "8000",
-                "-band", "500",   # wider band for large sequences
-            ], log_file=rpt_dir / f"{sample_id}_cdhit_large.log")
-        except Exception as e:
-            log_warn(f"  [cd-hit-est fallback] large dedup warning: {e}")
-            return records
-        finally:
-            Path(str(tmp_out) + ".clstr").unlink(missing_ok=True)
-        rep_ids = set(_load_fasta(tmp_out).keys())
-        return [r for r in records if r.contig_id in rep_ids]
-
     if len(records) <= 1:
         return records
 
-    combined  = tmp_dir / f"{sample_id}_large.fasta"
-    sketch_pf = tmp_dir / f"{sample_id}_large"     # mash appends .msh
+    combined  = tmp_dir / f"{sample_id}_all.fasta"
+    sketch_pf = tmp_dir / f"{sample_id}_all"     # mash appends .msh
     sketch    = Path(str(sketch_pf) + ".msh")
 
     _write_fasta_records(records, combined)
@@ -645,7 +686,10 @@ def _mash_dereplicate(
             log_file=rpt_dir / f"{sample_id}_mash.log",
         )
     except Exception as e:
-        log_warn(f"  [mash sketch] warning: {e} -- skipping large-contig dedup")
+        log_warn(
+            f"  [mash sketch] warning: {e} -- "
+            "falling back to cd-hit-est (circular permutations may not be caught)"
+        )
         return records
 
     try:
@@ -655,7 +699,7 @@ def _mash_dereplicate(
         )
         dist_output = result.stdout
     except Exception as e:
-        log_warn(f"  [mash dist] warning: {e} -- skipping large-contig dedup")
+        log_warn(f"  [mash dist] warning: {e} -- skipping dereplication")
         return records
 
     # Union-Find clustering
