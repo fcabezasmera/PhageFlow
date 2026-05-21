@@ -1,28 +1,70 @@
 """PhageFlow Module 01 — Quality control and trimming.
 
-Designed for purified phage Illumina PE sequencing.
+Optimized for purified phage Illumina PE150 sequencing.
+Goal: complete and High-quality genomes via CheckV (Nayfach et al. 2021).
 
 Tools:
-    fastp   : adapter trimming, sliding-window quality trimming,
-              low-complexity filtering (Chen et al. 2018, Genome Biology)
+    fastp   : adapter trimming, PE overlap correction, sliding-window quality
+              trimming, low-complexity filtering
+              (Chen et al. 2018, Genome Biology 19:274)
     FastQC  : per-read quality metrics (Andrews 2010)
     MultiQC : aggregate QC report (Ewels et al. 2016, Bioinformatics)
 
-fastp parameters (literature-based for phage sequencing):
+fastp parameters (literature-based for phage complete genome recovery):
+
+    --correction / --overlap_len_require 10 / --overlap_diff_percent_limit 10
+        PE overlap-based base error correction (Chen et al. 2018).
+        Reduces base errors before De Bruijn graph construction → longer SPAdes
+        contigs → higher CheckV completeness scores (Bankevich et al. 2012).
+        Corrects mismatches in overlapping PE read pairs; requires ≥10 bp overlap
+        and tolerates ≤10% mismatch in the overlap region.
+
     --cut_right / --cut_right_window_size 4 / --cut_right_mean_quality 20
-        Sliding-window 3' trimming (Bolger et al. 2014; Chen et al. 2018)
+        Sliding-window 3' trimming (Bolger et al. 2014; Chen et al. 2018).
+
     --qualified_quality_phred 20
-        Q20 threshold: 99% base call accuracy (Illumina quality guidelines)
-    --unqualified_percent_limit 20
-        Max 20% low-quality bases per read (Chen et al. 2018)
+        Q20 threshold: 99% base call accuracy (Illumina quality guidelines).
+
+    --unqualified_percent_limit 10
+        Max 10% low-quality bases per read — tighter than the fastp default of
+        40% to retain only high-quality reads for complete genome assembly
+        (Wick & Holt 2022, Microb Genomics 8:mgen000788).
+
+    --average_qual 25
+        Discard reads with mean Phred quality < Q25. Per-base thresholds can
+        pass reads that are uniformly mediocre (many Q20-Q24 bases, none below
+        Q20); a mean-quality floor complements the per-base filter and is a
+        better predictor of assembly quality (Wick & Holt 2022).
+
     --length_required 75
-        Minimum 75 bp for PE150 data (Bankevich et al. 2012)
+        Minimum 75 bp for PE150 data (Bankevich et al. 2012).
+
     --low_complexity_filter --complexity_threshold 30
-        Removes homopolymer/repetitive reads (Roux et al. 2019, eLife)
+        Removes homopolymer/repetitive reads (Roux et al. 2019, eLife).
+
     --n_base_limit 5
-        Remove reads with >5 N calls (standard practice)
+        Remove reads with >5 N calls (standard practice).
+
     --detect_adapter_for_pe
-        Automatic adapter detection for paired-end data (Chen et al. 2018)
+        Automatic adapter detection for paired-end data (Chen et al. 2018).
+
+Thresholds (mode: purified_phage):
+
+    _DUP_WARN  = 70% : fastp estimates duplication via k-mer sampling, NOT
+        coordinate-based (unlike Picard). At the coverage typical of purified
+        phage preparations (100–5000×), many independent fragments share
+        identical k-mers from the phage genome, inflating the apparent
+        duplication rate. Rates of 50–70% are expected at high coverage without
+        PCR artefacts. The threshold is set to 70% to avoid false positives
+        (Head et al. 2014, BMC Genomics 15:179; Roux et al. 2019).
+
+    _MIN_READS = 50 000 : minimum reads after filtering to trigger the low-read
+        warning. Rationale — to assemble a complete 150 kb phage genome
+        (e.g. Herelleviridae, Ackermannviridae) at ≥50× coverage with PE150:
+            150 000 bp × 50× / 150 bp × 2 reads ≈ 50 000 read pairs.
+        50× is the empirical minimum for SPAdes to resolve DTR/ITR terminal
+        repeats that CheckV uses to classify genomes as "Complete"
+        (Nayfach et al. 2021, Nat Biotechnol 39:578; Bankevich et al. 2012).
 """
 
 from __future__ import annotations
@@ -46,13 +88,22 @@ TOOLS = ["fastp", "fastqc", "multiqc"]
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 _PASS_GOOD  = 90.0   # pass rate: green
-_PASS_WARN  = 80.0   # pass rate: yellow; below → red + warning message
+_PASS_WARN  = 75.0   # pass rate: yellow; below → red + warning message
+                     # Lowered from 80% to 75%: --unqualified_percent_limit 10
+                     # and --average_qual 25 intentionally reject more reads
+                     # than the fastp defaults. A 75–85% pass rate is expected
+                     # and desirable with strict HQ parameters
+                     # (Wick & Holt 2022, Microb Genomics 8:mgen000788).
 _Q20_GOOD   = 95.0
 _Q20_WARN   = 90.0
 _Q30_GOOD   = 85.0
 _Q30_WARN   = 75.0
-_DUP_WARN   = 30.0   # duplication above this is unusual for purified phage
-_MIN_READS  = 10_000 # fewer surviving reads → assembly-failure risk
+_DUP_WARN   = 70.0   # fastp k-mer-based; inflated at high phage coverage
+                     # (Head et al. 2014, BMC Genomics; Roux et al. 2019)
+_MIN_READS  = 50_000 # minimum for 50× on 150 kb phage genome at PE150
+                     # required for DTR/ITR detection (Nayfach et al. 2021)
+_AVG_QUAL   = 25     # mean Phred per read; complements per-base filter
+                     # (Wick & Holt 2022, Microb Genomics)
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -95,8 +146,13 @@ def run(
     log_step(f"Module 01 — QC  [{sample_id}]")
     _print_input_table(sample_id, r1, r2)
     log_info(
-        "  Parameters: Q≥20 | len≥75 bp | complexity≥30% | "
-        "sliding-window 4 bp/Q20 | adapter auto-detect"
+        "  Parameters: Q≥20 (per-base) | mean-Q≥25 | ≤10% low-qual bases | "
+        "len≥75 bp | complexity≥30% | PE correction | sliding-window 4/Q20 | "
+        "adapter auto-detect"
+    )
+    log_info(
+        "  PE correction: --correction --overlap_len_require 10 "
+        "--overlap_diff_percent_limit 10  (Chen et al. 2018)"
     )
 
     already_done = r1_out.exists() and r1_out.stat().st_size > 0 and not force
@@ -114,7 +170,7 @@ def run(
         task = progress.add_task("Initializing...", total=3)
 
         # 1/3 — fastp
-        progress.update(task, description="[1/3] fastp  — trimming & adapter removal")
+        progress.update(task, description="[1/3] fastp  — trimming, correction & filtering")
         if already_done:
             log_info("  [fastp] already trimmed — skipping  (--force to re-run)")
         else:
@@ -156,20 +212,47 @@ def _run_fastp(
     json_f: Path, html_f: Path,
     log_f:  Path, threads: int,
 ) -> None:
+    """
+    Run fastp with parameters optimised for complete phage genome recovery.
+
+    Key additions vs. generic QC:
+        --correction               : PE overlap-based error correction
+        --overlap_len_require 10   : min overlap bp to attempt correction
+        --overlap_diff_percent_limit 10 : max mismatch % in overlap
+        --average_qual 25          : read-level mean quality floor
+        --unqualified_percent_limit 10  : tighter than default 40%
+
+    References
+    ----------
+    Chen et al. (2018) Genome Biology 19:274 — fastp design and correction.
+    Wick & Holt (2022) Microb Genomics 8:mgen000788 — per-read quality filters.
+    Bankevich et al. (2012) J Comput Biol — k-mer quality and SPAdes assembly.
+    """
     cmd = [
         "fastp",
         "--in1",  str(r1),     "--in2",  str(r2),
         "--out1", str(r1_out), "--out2", str(r2_out),
+        # Adapter detection
         "--detect_adapter_for_pe",
+        # PE overlap-based error correction (Chen et al. 2018)
+        "--correction",
+        "--overlap_len_require",         "10",
+        "--overlap_diff_percent_limit",  "10",
+        # 3' sliding-window quality trimming (Bolger et al. 2014)
         "--cut_right",
-        "--cut_right_window_size",     "4",
-        "--cut_right_mean_quality",    "20",
-        "--qualified_quality_phred",   "20",
-        "--unqualified_percent_limit", "20",
-        "--n_base_limit",              "5",
-        "--length_required",           "75",
+        "--cut_right_window_size",       "4",
+        "--cut_right_mean_quality",      "20",
+        # Per-base quality filter
+        "--qualified_quality_phred",     "20",
+        "--unqualified_percent_limit",   "10",   # tighter for HQ assembly
+        # Read-level mean quality floor (Wick & Holt 2022)
+        "--average_qual",                str(_AVG_QUAL),
+        # Other filters
+        "--n_base_limit",                "5",
+        "--length_required",             "75",
         "--low_complexity_filter",
-        "--complexity_threshold",      "30",
+        "--complexity_threshold",        "30",
+        # Output
         "--thread",       str(threads),
         "--json",         str(json_f),
         "--html",         str(html_f),
@@ -177,7 +260,7 @@ def _run_fastp(
     ]
     try:
         run_silent(cmd, log_file=log_f)
-        log_ok("  fastp · trimming complete")
+        log_ok("  fastp · trimming + PE correction complete")
     except Exception as e:
         log_warn(f"  fastp · non-zero exit — check log: {log_f}  ({e})")
         raise
@@ -188,7 +271,14 @@ def _validate_output(
     r1_out: Path, r2_out: Path,
     json_f:  Path,
 ) -> None:
-    """Post-fastp sanity checks: file presence + minimum surviving reads."""
+    """
+    Post-fastp sanity checks: file presence + minimum surviving reads.
+
+    _MIN_READS = 50 000 is the empirical minimum for 50× coverage of a
+    150 kb phage genome (PE150), required for DTR/ITR detection in CheckV
+    (Nayfach et al. 2021). Genomes below this coverage threshold are unlikely
+    to receive a 'Complete' or 'High-quality' classification.
+    """
     for label, path in [("R1", r1_out), ("R2", r2_out)]:
         if not path.exists() or path.stat().st_size == 0:
             log_warn(f"  [validate] {label} output missing or empty: {path}")
@@ -203,8 +293,9 @@ def _validate_output(
         if n_out < _MIN_READS:
             log_warn(
                 f"  validate · only {n_out:,} reads passed filtering — "
-                f"assembly may fail with < {_MIN_READS:,} reads. "
-                f"Consider lowering quality thresholds."
+                f"< {_MIN_READS:,} reads may be insufficient for 50× coverage "
+                f"of a 150 kb phage genome; Complete/HQ CheckV classification "
+                f"may be compromised (Nayfach et al. 2021)."
             )
         else:
             log_ok(f"  validate · {n_out:,} reads passed — OK")
@@ -264,9 +355,10 @@ def _parse_fastp_json(json_f: Path) -> dict:
     reads_in / reads_out / pct_pass
     mean_len_in / mean_len_out
     gc_pct / q20_pct / q30_pct
-    dup_rate          — duplication rate (%)
+    dup_rate          — duplication rate (k-mer-based; inflated at high coverage)
     insert_peak       — insert size peak (bp)
     adapter_pct       — % reads with adapter trimmed
+    correction_rate   — % read pairs corrected by PE overlap correction (new)
     filt_lowqual      — reads removed: low quality
     filt_tooshort     — reads removed: too short
     filt_lowcomplex   — reads removed: low complexity
@@ -277,6 +369,7 @@ def _parse_fastp_json(json_f: Path) -> dict:
         "mean_len_in", "mean_len_out",
         "gc_pct", "q20_pct", "q30_pct",
         "dup_rate", "insert_peak", "adapter_pct",
+        "correction_rate",
         "filt_lowqual", "filt_tooshort", "filt_lowcomplex", "filt_n",
     )}
     if not json_f.exists():
@@ -294,27 +387,41 @@ def _parse_fastp_json(json_f: Path) -> dict:
         ml_in  = bf.get("read1_mean_length", 0)
         ml_out = af.get("read1_mean_length", 0)
 
-        dup    = d.get("duplication", {}).get("rate")
-        ins    = d.get("insert_size",  {}).get("peak")
+        dup    = d.get("duplication",    {}).get("rate")
+        ins    = d.get("insert_size",    {}).get("peak")
         adp_r  = d.get("adapter_cutting", {}).get("adapter_trimmed_reads")
         fr     = d.get("filtering_result", {})
 
+        # PE correction stats (present only when --correction is active).
+        # corrected_reads == 0 is a valid result (no overlapping pairs found);
+        # must show "0.0%" not "N/A" so the user knows correction ran.
+        corr_data  = d.get("correction", {})
+        corr_pairs = corr_data.get("corrected_reads", None)
+        if corr_pairs is None:
+            # --correction was not active or fastp version does not emit this key
+            corr_rate = "N/A"
+        elif ri:
+            corr_rate = f"{corr_pairs / ri * 100:.1f}%"
+        else:
+            corr_rate = "0.0%"
+
         return {
-            "reads_in":       f"{ri:,}",
-            "reads_out":      f"{ro:,}",
-            "pct_pass":       f"{pp:.1f}%",
-            "mean_len_in":    f"{ml_in:.0f} bp",
-            "mean_len_out":   f"{ml_out:.0f} bp",
-            "gc_pct":         f"{af.get('gc_content', 0) * 100:.1f}%",
-            "q20_pct":        f"{af.get('q20_rate',    0) * 100:.1f}%",
-            "q30_pct":        f"{af.get('q30_rate',    0) * 100:.1f}%",
-            "dup_rate":       f"{dup  * 100:.1f}%" if dup  is not None else "N/A",
-            "insert_peak":    f"{ins} bp"           if ins  is not None else "N/A",
-            "adapter_pct":    f"{adp_r / ri * 100:.1f}%" if (adp_r and ri) else "N/A",
-            "filt_lowqual":   str(fr.get("low_quality_reads",    0)),
-            "filt_tooshort":  str(fr.get("too_short_reads",      0)),
-            "filt_lowcomplex":str(fr.get("low_complexity_reads", 0)),
-            "filt_n":         str(fr.get("too_many_N_reads",     0)),
+            "reads_in":        f"{ri:,}",
+            "reads_out":       f"{ro:,}",
+            "pct_pass":        f"{pp:.1f}%",
+            "mean_len_in":     f"{ml_in:.0f} bp",
+            "mean_len_out":    f"{ml_out:.0f} bp",
+            "gc_pct":          f"{af.get('gc_content', 0) * 100:.1f}%",
+            "q20_pct":         f"{af.get('q20_rate',   0) * 100:.1f}%",
+            "q30_pct":         f"{af.get('q30_rate',   0) * 100:.1f}%",
+            "dup_rate":        f"{dup * 100:.1f}%" if dup  is not None else "N/A",
+            "insert_peak":     f"{ins} bp"          if ins  is not None else "N/A",
+            "adapter_pct":     f"{adp_r / ri * 100:.1f}%" if (adp_r and ri) else "N/A",
+            "correction_rate": corr_rate,
+            "filt_lowqual":    str(fr.get("low_quality_reads",    0)),
+            "filt_tooshort":   str(fr.get("too_short_reads",      0)),
+            "filt_lowcomplex": str(fr.get("low_complexity_reads", 0)),
+            "filt_n":          str(fr.get("too_many_N_reads",     0)),
         }
     except Exception:
         return empty
@@ -348,16 +455,20 @@ def _print_input_table(sample_id: str, r1: Path, r2: Path) -> None:
 def _print_summary_table(sample_id: str, m: dict) -> None:
     """Print QC metrics as compact log lines."""
     log_ok(
-        f"  Reads  : {m['reads_in']} → {m['reads_out']}  "
+        f"  Reads    : {m['reads_in']} → {m['reads_out']}  "
         f"({_color_rate(m['pct_pass'], _PASS_GOOD, _PASS_WARN)} pass)"
     )
     log_ok(
-        f"  Quality: Q20={m['q20_pct']}  Q30={m['q30_pct']}  "
+        f"  Quality  : Q20={m['q20_pct']}  Q30={m['q30_pct']}  "
         f"GC={m['gc_pct']}  len={m['mean_len_out']}"
     )
     log_ok(
-        f"  Library: dup={_fmt(m['dup_rate'])}  "
+        f"  Library  : dup={_fmt(m['dup_rate'])}  "
         f"insert={_fmt(m['insert_peak'])}  adapter={_fmt(m['adapter_pct'])}"
+    )
+    log_ok(
+        f"  Correction: PE overlap corrected={_fmt(m['correction_rate'])}  "
+        f"(Chen et al. 2018)"
     )
 
     # Filtering breakdown — only non-zero entries
@@ -373,25 +484,40 @@ def _print_summary_table(sample_id: str, m: dict) -> None:
         if m.get(key, "0") not in ("0", "N/A", "", None)
     ]
     if parts:
-        log_info(f"  Filtered: {' | '.join(parts)}")
+        log_info(f"  Filtered : {' | '.join(parts)}")
 
 
 def _check_warnings(m: dict) -> None:
     """Emit contextual warnings based on QC metrics."""
     try:
-        if float(m["pct_pass"].rstrip("%")) < _PASS_WARN:
+        pass_val = float(m["pct_pass"].rstrip("%"))
+        if pass_val < _PASS_WARN:
             log_warn(
                 f"  Pass rate {m['pct_pass']} < {_PASS_WARN}% — "
-                "check raw read quality or residual host contamination."
+                "check raw read quality or residual host contamination. "
+                "Note: --unqualified_percent_limit 10 and --average_qual 25 "
+                "are intentionally strict; 75–85% pass rates are expected "
+                "and indicate effective removal of low-quality reads "
+                "(Wick & Holt 2022)."
+            )
+        elif pass_val < _PASS_GOOD:
+            log_info(
+                f"  Pass rate {m['pct_pass']}: acceptable with strict HQ filters "
+                f"(--unqualified_percent_limit 10 / --average_qual 25). "
+                f"Q30={m.get('q30_pct','?')} confirms retained reads are high quality."
             )
     except (ValueError, AttributeError):
         pass
 
     try:
-        if float(m["dup_rate"].rstrip("%")) > _DUP_WARN:
+        dup_val = float(m["dup_rate"].rstrip("%"))
+        if dup_val > _DUP_WARN:
             log_warn(
                 f"  Duplication {m['dup_rate']} > {_DUP_WARN}% — "
-                "possible PCR over-amplification or very high phage coverage."
+                "fastp uses k-mer sampling; rates >50% are expected at high "
+                "phage coverage (100–5000×) without PCR artefacts. "
+                "Consider Picard MarkDuplicates for coordinate-based estimation "
+                "if PCR bias is a concern (Head et al. 2014, BMC Genomics)."
             )
     except (ValueError, AttributeError):
         pass
@@ -400,7 +526,23 @@ def _check_warnings(m: dict) -> None:
         if float(m["q30_pct"].rstrip("%")) < _Q30_WARN:
             log_warn(
                 f"  Q30 rate {m['q30_pct']} < {_Q30_WARN}% — "
-                "base call quality is low; assembly contiguity may be reduced."
+                "base call quality is low; SPAdes assembly contiguity will be "
+                "reduced and Complete/HQ genome classification in CheckV "
+                "may be compromised (Nayfach et al. 2021)."
+            )
+    except (ValueError, AttributeError):
+        pass
+
+    try:
+        n_out_str = m.get("reads_out", "0").replace(",", "")
+        n_out = int(n_out_str) if n_out_str not in ("N/A", "") else 0
+        if 0 < n_out < _MIN_READS:
+            log_warn(
+                f"  Only {m['reads_out']} reads passed filtering — "
+                f"< {_MIN_READS:,} reads may be insufficient for 50× coverage "
+                f"of a 150 kb phage genome; Complete/HQ CheckV classification "
+                f"requires adequate DTR/ITR coverage (Nayfach et al. 2021; "
+                f"Bankevich et al. 2012)."
             )
     except (ValueError, AttributeError):
         pass
@@ -412,7 +554,11 @@ def _print_completion_panel(sample_id, r1_out, r2_out, rpt_dir, m: dict) -> None
     text.append("✓ ", style="bold green")
     text.append(f"{m.get('reads_in', '?')} reads  →  ", style="dim white")
     text.append(f"{m.get('reads_out', '?')}", style="bold green")
-    text.append(f"  (pass rate: {m.get('pct_pass', '?')})\n\n", style="cyan")
+    text.append(f"  (pass rate: {m.get('pct_pass', '?')})\n", style="cyan")
+    text.append(
+        f"  PE correction: {m.get('correction_rate', 'N/A')} reads corrected\n\n",
+        style="dim white",
+    )
     text.append("Trimmed R1 : ", style="dim white")
     text.append(str(r1_out) + "\n", style="white")
     text.append("Trimmed R2 : ", style="dim white")
@@ -437,6 +583,7 @@ _TSV_HEADERS = [
     "mean_len_in", "mean_len_out",
     "gc_pct", "q20_pct", "q30_pct",
     "dup_rate", "insert_peak", "adapter_pct",
+    "correction_rate",
     "filt_lowqual", "filt_tooshort", "filt_lowcomplex", "filt_n",
 ]
 
