@@ -369,7 +369,7 @@ def _parse_fastp_json(json_f: Path) -> dict:
         "mean_len_in", "mean_len_out",
         "gc_pct", "q20_pct", "q30_pct",
         "dup_rate", "insert_peak", "adapter_pct",
-        "correction_rate",
+        "correction_rate", "corrected_reads", "corrected_bases",
         "filt_lowqual", "filt_tooshort", "filt_lowcomplex", "filt_n",
     )}
     if not json_f.exists():
@@ -392,16 +392,20 @@ def _parse_fastp_json(json_f: Path) -> dict:
         adp_r  = d.get("adapter_cutting", {}).get("adapter_trimmed_reads")
         fr     = d.get("filtering_result", {})
 
-        # PE correction stats (present only when --correction is active).
-        # corrected_reads == 0 is a valid result (no overlapping pairs found);
-        # must show "0.0%" not "N/A" so the user knows correction ran.
-        corr_data  = d.get("correction", {})
-        corr_pairs = corr_data.get("corrected_reads", None)
-        if corr_pairs is None:
-            # --correction was not active or fastp version does not emit this key
+        # PE correction stats — fastp 1.3.x stores corrected_reads inside
+        # filtering_result (not in a top-level "correction" key as in older docs).
+        # corrected_reads == 0 is valid (high-quality reads with no mismatches
+        # in their overlap region); show "0.0%" so the user knows correction ran.
+        corr_reads = fr.get("corrected_reads", None)
+        corr_bases = fr.get("corrected_bases", None)
+        if corr_reads is None:
+            # fastp was run without --correction, or unknown JSON layout
             corr_rate = "N/A"
         elif ri:
-            corr_rate = f"{corr_pairs / ri * 100:.1f}%"
+            corr_rate = (
+                f"{corr_reads / ri * 100:.2f}%"
+                f" ({corr_reads:,} reads / {corr_bases or 0:,} bases)"
+            )
         else:
             corr_rate = "0.0%"
 
@@ -417,7 +421,9 @@ def _parse_fastp_json(json_f: Path) -> dict:
             "dup_rate":        f"{dup * 100:.1f}%" if dup  is not None else "N/A",
             "insert_peak":     f"{ins} bp"          if ins  is not None else "N/A",
             "adapter_pct":     f"{adp_r / ri * 100:.1f}%" if (adp_r and ri) else "N/A",
-            "correction_rate": corr_rate,
+            "correction_rate":  corr_rate,
+            "corrected_reads":  str(corr_reads) if corr_reads is not None else "N/A",
+            "corrected_bases":  str(corr_bases) if corr_bases is not None else "N/A",
             "filt_lowqual":    str(fr.get("low_quality_reads",    0)),
             "filt_tooshort":   str(fr.get("too_short_reads",      0)),
             "filt_lowcomplex": str(fr.get("low_complexity_reads", 0)),
@@ -583,7 +589,7 @@ _TSV_HEADERS = [
     "mean_len_in", "mean_len_out",
     "gc_pct", "q20_pct", "q30_pct",
     "dup_rate", "insert_peak", "adapter_pct",
-    "correction_rate",
+    "correction_rate", "corrected_reads", "corrected_bases",
     "filt_lowqual", "filt_tooshort", "filt_lowcomplex", "filt_n",
 ]
 
