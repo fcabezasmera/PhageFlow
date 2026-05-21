@@ -8,13 +8,24 @@ Tools:
     cd-hit-est  (Fu et al. 2012, Bioinformatics 28:3150)     -- fallback only
     seqkit      (Shen et al. 2016, PLoS ONE 11:e0163962)
 
-Output structure (per-sample folders):
-    results/05_quality/annotation_ready/phages/{sample_id}/
-    results/05_quality/annotation_ready/proviruses/{sample_id}/
-    results/05_quality/drafts/{sample_id}/
-    All output paths are namespaced by sample_id to prevent cross-sample
-    filename collisions (e.g. two samples both producing
-    Ackermannviridae_candidate_001).
+Output structure (all outputs namespaced under results/05_quality/{sample_id}/):
+
+    results/05_quality/{sample_id}/
+    ├── annotation_ready/
+    │   ├── phages/         ← HQ phage candidate FASTAs
+    │   └── proviruses/     ← HQ provirus candidate FASTAs
+    ├── checkv/             ← raw CheckV output (quality_summary.tsv, etc.)
+    ├── drafts/             ← LQ/ND rescued FASTAs not yet annotation-ready
+    └── tmp/                ← temporary files (removed after run)
+
+    reports/05_quality/
+    ├── checkv_summary.tsv          ← aggregated across all samples
+    ├── {sample_id}_rename_map.tsv
+    └── {sample_id}_checkv.log
+
+    Namespacing all outputs under results/05_quality/{sample_id}/ keeps each
+    sample fully self-contained and simplifies multi-sample runs: deleting or
+    reprocessing one sample never touches another's files.
 
 Dereplication strategy:
     mash is used for ALL contig sizes when available.
@@ -119,8 +130,11 @@ def run(
     """
     Assess genome quality, rescue, dereplicate, co-bin, and format candidates.
 
-    Output paths are namespaced under {sample_id}/ to prevent cross-sample
-    filename collisions.
+    All outputs go to results/05_quality/{sample_id}/ with subdirectories:
+        annotation_ready/phages/    HQ phage FASTAs
+        annotation_ready/proviruses/ HQ provirus FASTAs
+        checkv/                     raw CheckV output
+        drafts/                     rescued draft FASTAs
 
     Returns
     -------
@@ -132,12 +146,16 @@ def run(
     out_dir   = cfg.results(STEP)
     rpt_dir   = cfg.reports(STEP)
 
-    # Per-sample output folders -- prevent cross-sample filename collisions
-    phage_dir = out_dir / "annotation_ready" / "phages"     / sample_id
-    prov_dir  = out_dir / "annotation_ready" / "proviruses" / sample_id
-    draft_dir = out_dir / "drafts"                          / sample_id
-    tmp_dir   = out_dir / "tmp"                             / sample_id
-    mkdirs(out_dir, rpt_dir, phage_dir, prov_dir, draft_dir, tmp_dir)
+    # All per-sample outputs live under results/05_quality/{sample_id}/
+    # This keeps each sample fully self-contained: deleting or reprocessing
+    # one sample never touches another's files.
+    sample_dir  = out_dir / sample_id
+    phage_dir   = sample_dir / "annotation_ready" / "phages"
+    prov_dir    = sample_dir / "annotation_ready" / "proviruses"
+    draft_dir   = sample_dir / "drafts"
+    checkv_dir  = sample_dir / "checkv"
+    tmp_dir     = sample_dir / "tmp"
+    mkdirs(out_dir, rpt_dir, phage_dir, prov_dir, draft_dir, checkv_dir, tmp_dir)
 
     log_step(f"Module 05 -- quality [{sample_id}]")
 
@@ -168,7 +186,7 @@ def run(
     )
     log_info(
         f"  Co-bin  : >=30kb shared-taxonomy drafts -> annotation_ready/ | "
-        f"output: annotation_ready/{{phages,proviruses}}/{sample_id}/"
+        f"output: {sample_id}/annotation_ready/{{phages,proviruses}}/"
     )
 
     if not cfg.databases.checkv.exists():
@@ -182,8 +200,7 @@ def run(
             "Run viral-id before quality."
         )
 
-    sdir  = out_dir / sample_id
-    qfile = sdir / "quality_summary.tsv"
+    qfile = checkv_dir / "quality_summary.tsv"
 
     summary:       dict               = {}
     hq_records:    list[ContigRecord] = []
@@ -204,14 +221,14 @@ def run(
 
         # 1/4 -- CheckV
         progress.update(task, description="[1/4] CheckV   -- end-to-end assessment")
-        _run_checkv(cfg, sample_id, virus_fna, sdir, rpt_dir, force)
+        _run_checkv(cfg, sample_id, virus_fna, checkv_dir, rpt_dir, force)
         progress.advance(task)
 
         # 2/4 -- Tier selection + rescue
         progress.update(task, description="[2/4] CheckV   -- tier selection + rescue")
         if qfile.exists():
             seqs      = _load_fasta(virus_fna)
-            prov_seqs = _load_provirus_seqs(sdir / "proviruses.fna")
+            prov_seqs = _load_provirus_seqs(checkv_dir / "proviruses.fna")
             summary, hq_records, draft_records = _parse_checkv(
                 sample_id, qfile, seqs, prov_seqs, cfg.checkv,
             )
@@ -263,8 +280,7 @@ def run(
             n_phage = sum(1 for r in hq_records if not r.is_provirus)
             n_prov  = sum(1 for r in hq_records if r.is_provirus)
             log_ok(
-                f"  [seqkit] {len(hq_fastas)} file(s) -> "
-                f"{phage_dir.parent.name}/{sample_id}/  "
+                f"  [seqkit] {len(hq_fastas)} file(s) -> {sample_id}/annotation_ready/  "
                 f"(phage={n_phage}  provirus={n_prov}  multi-contig={n_multi})"
             )
         progress.advance(task)
@@ -277,7 +293,7 @@ def run(
     if summary:
         _save_tsv(summary, rpt_dir / "checkv_summary.tsv")
     _print_completion_panel(
-        sample_id, phage_dir, prov_dir, draft_dir, rpt_dir,
+        sample_id, sample_dir, phage_dir, prov_dir, draft_dir, checkv_dir, rpt_dir,
         summary, hq_fastas, draft_records,
     )
 
@@ -1172,7 +1188,7 @@ def _check_warnings(summary: dict, min_completeness: float) -> None:
 
 
 def _print_completion_panel(
-    sample_id, phage_dir, prov_dir, draft_dir, rpt_dir,
+    sample_id, sample_dir, phage_dir, prov_dir, draft_dir, checkv_dir, rpt_dir,
     summary, hq_fastas, draft_records,
 ) -> None:
     text = Text()
@@ -1185,8 +1201,10 @@ def _print_completion_panel(
     )
     text.append(f"{len(hq_fastas)}", style="bold green")
     text.append(" genome(s) annotation-ready\n\n", style="cyan")
+    text.append("Sample dir : ", style="dim white")
+    text.append(str(sample_dir) + "\n", style="white")
     if hq_fastas:
-        text.append("Phages Dir : ", style="dim white")
+        text.append("Phages     : ", style="dim white")
         text.append(str(phage_dir) + "\n", style="white")
         text.append("Proviruses : ", style="dim white")
         text.append(str(prov_dir) + "\n", style="white")
@@ -1195,6 +1213,8 @@ def _print_completion_panel(
     if draft_records:
         text.append("Drafts     : ", style="dim white")
         text.append(str(draft_dir / f"{sample_id}_draft.fasta") + "\n", style="white")
+    text.append("CheckV     : ", style="dim white")
+    text.append(str(checkv_dir / "quality_summary.tsv") + "\n", style="white")
     text.append("Summary    : ", style="dim white")
     text.append(str(rpt_dir / "checkv_summary.tsv"), style="white")
 
