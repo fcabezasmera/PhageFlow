@@ -53,8 +53,11 @@ class AssemblyConfig:
 
 @dataclass
 class GenomadConfig:
-    min_score:     float = 0.7
-    min_hallmarks: int   = 0
+    min_score:            float = 0.7
+    min_hallmarks:        int   = 0
+    rescue_min_score:     float = 0.4   # NEW: floor score for length-based rescue
+    rescue_min_length_bp: int   = 10_000  # NEW: min length (bp) for borderline rescue
+
 
 
 @dataclass
@@ -163,7 +166,14 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
         cfg.genomad.min_hallmarks = int(
             g.get("min_virus_hallmarks", g.get("min_hallmarks", cfg.genomad.min_hallmarks))
         )
-
+        
+        cfg.genomad.rescue_min_score     = float(
+            g.get("rescue_min_score",     cfg.genomad.rescue_min_score)
+        )
+        cfg.genomad.rescue_min_length_bp = int(
+            g.get("rescue_min_length_bp", cfg.genomad.rescue_min_length_bp)
+        )
+ 
     if "checkv" in raw:
         c = raw["checkv"]
         cfg.checkv.min_completeness   = float(c.get("min_completeness",   cfg.checkv.min_completeness))

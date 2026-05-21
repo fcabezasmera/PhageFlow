@@ -159,27 +159,40 @@ def cmd_host_removal(config, workdir, threads, force,
 @cli.command("assembly")
 @common_options
 @reads_options
-def cmd_assembly(config, workdir, threads, force, sample_id, r1_path, r2_path):
+@click.option(
+    "--s1", "s1_path", default=None,
+    type=click.Path(),
+    help=(
+        "Singleton reads from host-removal "
+        "(results/02_host_removal/{sample}_singletons.fastq.gz). "
+        "Passed to SPAdes --s1 to improve DTR/ITR boundary coverage "
+        "(Nayfach et al. 2021)."
+    ),
+)
+def cmd_assembly(config, workdir, threads, force, sample_id, r1_path, r2_path, s1_path):
     """De novo assembly for a single sample.
-
+ 
     \b
-    Tools: metaSPAdes --only-assembler + MEGAHIT --no-mercy + cd-hit-est 100%
-    References: Roux et al. 2019 (eLife); Li et al. 2015 (Bioinformatics).
-
+    Tools: SPAdes --isolate --only-assembler + MEGAHIT --no-mercy + cd-hit-est
+    References: Prjibelski et al. 2020 (Current Protocols);
+                Roux et al. 2019 (eLife); Li et al. 2015 (Bioinformatics).
+ 
     \b
     Example:
       phageflow assembly --sample-id s1 \\
         --r1 results/02_host_removal/s1_R1.fastq.gz \\
-        --r2 results/02_host_removal/s1_R2.fastq.gz
+        --r2 results/02_host_removal/s1_R2.fastq.gz \\
+        --s1 results/02_host_removal/s1_singletons.fastq.gz
     """
     cfg = _load(config, workdir)
     if threads:
         cfg.threads = threads
     from phageflow.modules.assembly import run
     run(cfg, sample_id=sample_id,
-        r1=Path(r1_path), r2=Path(r2_path), force=force)
-
-
+        r1=Path(r1_path), r2=Path(r2_path),
+        s1=Path(s1_path) if s1_path else None,
+        force=force)
+ 
 # ---------------------------------------------------------------------------
 # viral-id
 # ---------------------------------------------------------------------------

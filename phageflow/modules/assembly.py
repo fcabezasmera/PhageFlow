@@ -1,57 +1,69 @@
 """PhageFlow Module 03 — De novo assembly.
 
+Goal: produce complete or near-complete phage genome contigs for downstream
+CheckV Complete/High-quality classification (Nayfach et al. 2021).
+
 Tools and parameters (literature-based for purified phage sequencing):
 
-SPAdes v3.15+ (Bankevich et al. 2012, Journal of Computational Biology):
-    --meta
-        Metagenomic mode: handles variable coverage better than --isolate
-        for mixed preparations (phage + contamination residual).
-        Disables repeat resolving that can collapse phage terminal repeats.
-        Recommended by Prjibelski et al. 2020 (Current Protocols) for viral.
+SPAdes v3.15+ (Bankevich et al. 2012, Journal of Computational Biology 19:455):
+    --isolate
+        Isolate mode: optimised for high-coverage single-organism preparations.
+        Avoids the variable-coverage heuristics in --meta (designed for
+        metagenomes spanning 0.1×–10 000×) that can fragment the De Bruijn
+        graph in uniform high-coverage phage data.
+        (Prjibelski et al. 2020, Current Protocols; Bankevich et al. 2012)
 
     --only-assembler
         Skip BayesHammer error correction — required at >200× coverage
         (BayesHammer collapses true variants into consensus, losing
         biological diversity in tail fiber / receptor binding proteins).
-        Roux et al. 2019 (eLife): explicitly recommended for viral datasets.
+        Compatible with --isolate (SPAdes ≥3.15).
+        (Roux et al. 2019, eLife 8:e42923)
 
     -k 21,33,55,77,99,127
         Multiple k-mers ensure coverage of both short repeats (k=21)
         and long unique regions (k=127). Standard for PE150 phage data
-        (Bankevich et al. 2012; SPAdes manual recommendation for PE150).
+        (Bankevich et al. 2012; SPAdes manual).
 
-    Post-assembly length filter: contigs < min_length (default 200 bp) are
-        discarded. Phage CDSs average 600–800 bp (Casjens 2005, Curr Opin);
-        contigs <200 bp cannot encode a full gene and are likely assembly
-        artefacts at high coverage. 200 bp is more permissive than the
-        500 bp default — appropriate for phage where compact genomes make
-        every contig relevant.
+    --s1 (singletons, optional)
+        Unpaired reads from host-removal step (reads whose pair aligned to host
+        but which are themselves unmapped). These represent phage fragments at
+        DTR/ITR boundaries; including them improves terminal coverage and raises
+        the probability of CheckV 'Complete' classification
+        (Nayfach et al. 2021, Nat Biotechnol 39:578).
 
-    Note: --cov-cutoff auto is INCOMPATIBLE with --meta (SPAdes ≥3.15)
+    Post-assembly length filter: contigs < min_length (default 200 bp) discarded.
+
+    Note: --cov-cutoff auto is INCOMPATIBLE with --isolate (SPAdes ≥3.15)
     Note: contigs.fasta used (NOT scaffolds.fasta) — scaffolds introduce
           artificial N-gaps that break ORF prediction in Pharokka/Phold.
 
-MEGAHIT v1.2+ (Li et al. 2015, Bioinformatics):
-    --k-list 21,29,39,59,79,99,119,141
-        Progressive k-mer list — covers a wider range than SPAdes default,
-        recovering contigs missed at intermediate k values.
+MEGAHIT v1.2+ (Li et al. 2015, Bioinformatics 31:1674):
+    --k-list {cfg.assembly.kmers}
+        Reuses the same k-mer list from config.yaml (default 21,33,55,77,99,127)
+        for reproducibility. Previously hardcoded; now synced with SPAdes.
 
     --min-count 2
         Minimum solid k-mer multiplicity — removes sequencing errors
         without losing low-coverage genuine phage k-mers.
 
     --no-mercy
-        Disable mercy k-mers (used to recover low-coverage tips).
-        At phage coverage (>200×), mercy k-mers add noise rather than
-        signal. Li et al. 2015: disable for high-coverage datasets.
+        Disable mercy k-mers at high coverage (>200×).
+        (Li et al. 2015)
 
-    --min-contig-len 200
-        Lowered from 500 to 200 bp — consistent with the SPAdes post-filter.
+    --min-contig-len {cfg.assembly.min_length}
+        Consistent with SPAdes post-filter (default 200 bp).
 
-cd-hit-est (Fu et al. 2012, Bioinformatics):
-    -c 1.00 (100% identity): removes exact duplicates between assemblers
-    while preserving biological variants (e.g. tail fiber diversity).
-    At 95%, true SNP-level variants collapse — not appropriate for phage.
+cd-hit-est (Fu et al. 2012, Bioinformatics 28:3150):
+    -c 1.00 : 100% sequence identity — removes exact duplicates only,
+              preserving biological SNP-level variants.
+    -aS 0.85 : ≥85% alignment coverage of the shorter sequence.
+               Changed from 1.00: with -aS 1.00, a MEGAHIT contig that is
+               95% the length of an equivalent SPAdes contig (same region,
+               100% identity) would NOT be dereplicated, creating functional
+               duplicates in downstream modules. -aS 0.85 eliminates these
+               while preserving genuine biological variants.
+               (Fu et al. 2012 — recommended for variable-length sequences)
 """
 
 from __future__ import annotations
@@ -74,9 +86,13 @@ STEP  = "03_assembly"
 TOOLS = ["spades.py", "megahit", "cd-hit-est"]
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
-_N50_WARN         = 5_000   # NR N50 < 5 kb → fragmented assembly
-_MAX_CONTIGS_WARN = 100     # NR contigs > 100 → unusual for purified phage
-_MIN_CONTIGS      = 1       # fewer NR contigs → assembly failure risk
+# For purified phage the goal is 1–5 contigs covering the full genome.
+_N50_GOOD         = 50_000  # N50 ≥ 50 kb: likely near-complete assembly
+_N50_WARN         = 20_000  # N50 < 20 kb: fragmented; CheckV Complete unlikely
+_N50_CRITICAL     = 5_000   # N50 < 5 kb:  severely fragmented; annotation unreliable
+_MAX_CONTIGS_WARN = 20      # >20 NR contigs unusual for purified phage
+_MAX_CONTIGS_CRIT = 100     # >100 NR contigs suggests assembly failure or contamination
+_MIN_CONTIGS      = 1
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -86,10 +102,17 @@ def run(
     sample_id: str,
     r1:        Path,
     r2:        Path,
-    force:     bool = False,
+    s1:        Optional[Path] = None,
+    force:     bool           = False,
 ) -> Path:
     """
-    Assemble a single sample with SPAdes + MEGAHIT, then dereplicate.
+    Assemble a single sample with SPAdes (--isolate) + MEGAHIT, then dereplicate.
+
+    Parameters
+    ----------
+    s1 : singletons FASTQ from host-removal (passed to SPAdes --s1).
+         Improves terminal DTR/ITR coverage → raises CheckV 'Complete' rate
+         (Nayfach et al. 2021). Pass None to skip.
 
     Returns
     -------
@@ -105,11 +128,15 @@ def run(
     nr_fa = out_dir / "combined" / f"{sample_id}_contigs_nr.fasta"
 
     log_step(f"Module 03 — assembly [{sample_id}]")
-    _print_input_table(sample_id, r1, r2)
-    log_info(f"  SPAdes    : --meta --only-assembler  (Roux et al. 2019)")
-    log_info(f"  MEGAHIT   : --no-mercy --min-count 2  (Li et al. 2015)")
-    log_info(f"  Min length: {cfg.assembly.min_length} bp  |  k-mers: {cfg.assembly.kmers}")
-    log_info(f"  cd-hit-est: 100% identity dereplication  (Fu et al. 2012)")
+    _print_input_table(sample_id, r1, r2, s1)
+    log_info(f"  SPAdes   : --isolate --only-assembler  (Prjibelski et al. 2020; Roux et al. 2019)")
+    log_info(f"  MEGAHIT  : --no-mercy --min-count 2    (Li et al. 2015)")
+    log_info(f"  Min len  : {cfg.assembly.min_length} bp  |  k-mers: {cfg.assembly.kmers}")
+    log_info(f"  cd-hit-est: -c 1.00 -aS 0.85  (Fu et al. 2012)")
+    if s1 and Path(s1).exists() and Path(s1).stat().st_size > 0:
+        log_info(f"  Singletons: {s1}  ({human_size(Path(s1))}) → SPAdes --s1")
+    else:
+        log_info("  Singletons: none provided  (pass --s1 to include DTR/ITR boundary reads)")
 
     # ── Pipeline steps ────────────────────────────────────────────────────────
     sp_fa: Optional[Path] = None
@@ -127,8 +154,8 @@ def run(
         task = progress.add_task("Initializing...", total=3)
 
         # 1/3 — SPAdes + length filter
-        progress.update(task, description="[1/3] SPAdes    — de novo assembly")
-        sp_fa = _run_spades(cfg, sample_id, r1, r2, out_dir, rpt_dir, force)
+        progress.update(task, description="[1/3] SPAdes    — de novo assembly (--isolate)")
+        sp_fa = _run_spades(cfg, sample_id, r1, r2, s1, out_dir, rpt_dir, force)
         progress.advance(task)
 
         # 2/3 — MEGAHIT
@@ -141,7 +168,7 @@ def run(
         nr_fa = _run_cdhit(cfg, sample_id, sp_fa, mh_fa, out_dir, rpt_dir, force)
         progress.advance(task)
 
-    # ── Metrics, display, save ─────────────────────────────────────────────────
+    # ── Metrics, display, save ────────────────────────────────────────────────
     stats = _collect_stats(sp_fa, mh_fa, nr_fa)
     _validate_output(sample_id, nr_fa, stats)
     _save_tsv(sample_id, sp_fa, mh_fa, nr_fa, rpt_dir / "assembly_summary.tsv")
@@ -164,11 +191,29 @@ def _run_spades(
     sample_id: str,
     r1:        Path,
     r2:        Path,
+    s1:        Optional[Path],
     out_dir:   Path,
     rpt_dir:   Path,
     force:     bool,
 ) -> Path:
-    """Run metaSPAdes and apply post-assembly length filter."""
+    """
+    Run SPAdes in --isolate mode with optional singleton support.
+
+    --isolate is preferred over --meta for purified phage because:
+      - --meta applies variable-coverage heuristics (designed for 0.1×–10 000×
+        metagenomes) that can fragment the De Bruijn graph at the uniformly
+        high coverage typical of phage preparations (Prjibelski et al. 2020).
+      - --isolate uses an optimised graph simplification for single-organism
+        high-coverage data, producing longer contigs.
+
+    --only-assembler skips BayesHammer error correction, which is
+    counterproductive at >200× (collapses biological variants).
+    Compatible with --isolate in SPAdes ≥3.15 (Roux et al. 2019).
+
+    --s1 passes singleton reads from host removal as unpaired input.
+    SPAdes incorporates them in the De Bruijn graph, improving coverage
+    at DTR/ITR boundaries (Nayfach et al. 2021).
+    """
     sp_dir = out_dir / "spades" / sample_id
     sp_raw = sp_dir / "contigs.fasta"
     sp_fa  = sp_dir / "contigs_filtered.fasta"
@@ -178,17 +223,31 @@ def _run_spades(
         log_info("  [SPAdes] already exists — skipping")
         return sp_fa
 
+    cmd = [
+        "spades.py",
+        "--pe1-1", str(r1), "--pe1-2", str(r2),
+        "--isolate",          # ← purified phage high-coverage mode
+        "--only-assembler",   # ← skip error correction at >200× (Roux et al. 2019)
+        "-k",        cfg.assembly.kmers,
+        "--threads", str(cfg.threads),
+        "--memory",  str(cfg.memory_gb),
+        "-o",        str(sp_dir),
+    ]
+
+    # Singletons from host-removal → improve DTR/ITR boundary coverage
+    s1_path = Path(s1) if s1 else None
+    if s1_path and s1_path.exists() and s1_path.stat().st_size > 0:
+        cmd += ["--s1", str(s1_path)]
+        log_info(
+            f"  [SPAdes] --s1 {s1_path.name} included "
+            f"({human_size(s1_path)}) — DTR/ITR boundary coverage "
+            f"(Nayfach et al. 2021)"
+        )
+    else:
+        log_info("  [SPAdes] --isolate --only-assembler | no singletons")
+
     try:
-        run_silent([
-            "spades.py",
-            "--pe1-1", str(r1), "--pe1-2", str(r2),
-            "--meta",
-            "--only-assembler",
-            "-k",        cfg.assembly.kmers,
-            "--threads", str(cfg.threads),
-            "--memory",  str(cfg.memory_gb),
-            "-o",        str(sp_dir),
-        ], log_file=rpt_dir / f"{sample_id}_spades.log")
+        run_silent(cmd, log_file=rpt_dir / f"{sample_id}_spades.log")
     except Exception as e:
         log_warn(f"  [SPAdes] warning: {e}")
 
@@ -213,7 +272,17 @@ def _run_megahit(
     rpt_dir:   Path,
     force:     bool,
 ) -> Path:
-    """Run MEGAHIT assembly."""
+    """
+    Run MEGAHIT assembly.
+
+    k-list is read from cfg.assembly.kmers (same as SPAdes) for reproducibility.
+    Previously hardcoded as "21,29,39,59,79,99,119,141", which diverged from
+    the config value and was not user-configurable.
+
+    MEGAHIT and SPAdes use the same comma-separated k-mer format; the config
+    default "21,33,55,77,99,127" is valid for both tools.
+    (Li et al. 2015, Bioinformatics 31:1674)
+    """
     mh_dir = out_dir / "megahit" / sample_id
     mh_fa  = mh_dir / "final.contigs.fa"
 
@@ -230,7 +299,7 @@ def _run_megahit(
             "megahit",
             "-1", str(r1), "-2", str(r2),
             "-o",               str(mh_dir),
-            "--k-list",         "21,29,39,59,79,99,119,141",
+            "--k-list",         cfg.assembly.kmers,   # ← synced with config (was hardcoded)
             "--min-count",      "2",
             "--no-mercy",
             "--min-contig-len", str(cfg.assembly.min_length),
@@ -252,7 +321,24 @@ def _run_cdhit(
     rpt_dir:   Path,
     force:     bool,
 ) -> Path:
-    """Merge SPAdes + MEGAHIT contigs and dereplicate at 100% identity."""
+    """
+    Merge SPAdes + MEGAHIT contigs and dereplicate.
+
+    Parameters
+    ----------
+    -c 1.00  : 100% sequence identity — only exact duplicates collapsed.
+    -aS 0.85 : ≥85% alignment coverage of the shorter sequence.
+
+    Rationale for -aS 0.85 (changed from 1.00):
+        With -aS 1.00, two contigs must be nearly identical in length to be
+        considered duplicates. A MEGAHIT contig covering 95% of an equivalent
+        SPAdes contig (same genomic region, 100% identity) would NOT be
+        dereplicated, producing functional duplicate candidates in downstream
+        CheckV/geNomad modules. -aS 0.85 removes these while preserving
+        genuine biological variants (SNPs, indels).
+        (Fu et al. 2012, Bioinformatics 28:3150 — recommended for
+        variable-length sequence dereplication)
+    """
     nr_fa  = out_dir / "combined" / f"{sample_id}_contigs_nr.fasta"
     tmp_fa = out_dir / "combined" / f"{sample_id}_all_tmp.fasta"
 
@@ -288,7 +374,8 @@ def _run_cdhit(
         run_silent([
             "cd-hit-est",
             "-i", str(tmp_fa), "-o", str(nr_fa),
-            "-c", "1.00", "-aS", "1.00",
+            "-c", "1.00",
+            "-aS", "0.85",    # ← was 1.00; correct for variable-length dedup
             "-n", "10", "-d", "0",
             "-T", str(cfg.threads),
             "-M", str(cfg.memory_gb * 1000),
@@ -362,11 +449,7 @@ def _collect_stats(
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _filter_fasta(src: Path, dst: Path, min_len: int) -> tuple[int, int]:
-    """
-    Write sequences from src to dst keeping only those >= min_len bp.
-
-    Returns (n_total, n_kept).
-    """
+    """Write sequences from src to dst keeping only those >= min_len bp."""
     seqs: List[tuple[str, str]] = []
     header = seq = ""
 
@@ -393,17 +476,6 @@ def _filter_fasta(src: Path, dst: Path, min_len: int) -> tuple[int, int]:
 
 # ── Rich display helpers ──────────────────────────────────────────────────────
 
-def _color_rate(val_str: str, good: float, warn: float) -> str:
-    """Return Rich-colored string based on numeric thresholds."""
-    try:
-        v = float(str(val_str).rstrip("%"))
-        if v >= good: return f"[bold green]{val_str}[/bold green]"
-        if v >= warn: return f"[bold yellow]{val_str}[/bold yellow]"
-        return f"[bold red]{val_str}[/bold red]"
-    except (ValueError, AttributeError):
-        return str(val_str)
-
-
 def _fmt(val, unit: str = "") -> str:
     """Format metric value; dim 'N/A' or missing entries."""
     if val in ("N/A", "", None):
@@ -411,9 +483,24 @@ def _fmt(val, unit: str = "") -> str:
     return f"{val}{unit}"
 
 
-def _print_input_table(sample_id: str, r1: Path, r2: Path) -> None:
+def _color_n50(val) -> str:
+    """Color N50 value by completeness expectation for purified phage."""
+    try:
+        v = int(val)
+        if v >= _N50_GOOD:     return f"[bold green]{v:,}bp[/bold green]"
+        if v >= _N50_WARN:     return f"[bold yellow]{v:,}bp[/bold yellow]"
+        return f"[bold red]{v:,}bp[/bold red]"
+    except (ValueError, TypeError):
+        return "[dim]N/A[/dim]"
+
+
+def _print_input_table(
+    sample_id: str, r1: Path, r2: Path, s1: Optional[Path]
+) -> None:
     log_info(f"  R1 : {r1}  ({human_size(r1)})")
     log_info(f"  R2 : {r2}  ({human_size(r2)})")
+    if s1 and Path(s1).exists():
+        log_info(f"  S1 : {s1}  ({human_size(Path(s1))})  [singletons]")
 
 
 def _print_summary_table(sample_id: str, stats: dict) -> None:
@@ -421,19 +508,19 @@ def _print_summary_table(sample_id: str, stats: dict) -> None:
     log_ok(
         f"  SPAdes   : {_fmt(stats['sp_n'])} contigs | "
         f"largest={_fmt(stats['sp_largest'], 'bp')} | "
-        f"N50={_fmt(stats['sp_n50'], 'bp')} | "
+        f"N50={_color_n50(stats['sp_n50'])} | "
         f"total={_fmt(stats['sp_total'], 'bp')}"
     )
     log_ok(
         f"  MEGAHIT  : {_fmt(stats['mh_n'])} contigs | "
         f"largest={_fmt(stats['mh_largest'], 'bp')} | "
-        f"N50={_fmt(stats['mh_n50'], 'bp')} | "
+        f"N50={_color_n50(stats['mh_n50'])} | "
         f"total={_fmt(stats['mh_total'], 'bp')}"
     )
     log_ok(
         f"  NR final : {_fmt(stats['nr_n'])} contigs | "
         f"largest={_fmt(stats['nr_largest'], 'bp')} | "
-        f"N50={_fmt(stats['nr_n50'], 'bp')} | "
+        f"N50={_color_n50(stats['nr_n50'])} | "
         f"−{stats['pct_redundant']} redundant"
     )
 
@@ -447,19 +534,35 @@ def _check_warnings(stats: dict) -> None:
         return
 
     try:
-        if 0 < stats["nr_n50"] < _N50_WARN:
+        n50 = int(stats["nr_n50"])
+        if n50 < _N50_CRITICAL:
             log_warn(
-                f"  NR N50 = {stats['nr_n50']}bp < {_N50_WARN}bp — "
-                "fragmented assembly; viral classification may be affected."
+                f"  NR N50 = {n50:,}bp < {_N50_CRITICAL:,}bp — "
+                "severely fragmented assembly; Complete/HQ classification in "
+                "CheckV is unlikely. Check host removal and read quality."
+            )
+        elif n50 < _N50_WARN:
+            log_warn(
+                f"  NR N50 = {n50:,}bp < {_N50_WARN:,}bp — "
+                "fragmented assembly; CheckV 'Complete' classification requires "
+                "contigs spanning the full genome with DTR/ITR termini. "
+                "Consider increasing coverage or checking for contamination."
             )
     except (TypeError, ValueError):
         pass
 
     try:
-        if stats["nr_n"] > _MAX_CONTIGS_WARN:
+        nr_n = int(stats["nr_n"])
+        if nr_n > _MAX_CONTIGS_CRIT:
             log_warn(
-                f"  {stats['nr_n']} NR contigs — unusually high for purified phage; "
-                "consider stricter host removal or checking for contamination."
+                f"  {nr_n} NR contigs — assembly failure or heavy contamination; "
+                "verify host-removal step and sample purity."
+            )
+        elif nr_n > _MAX_CONTIGS_WARN:
+            log_warn(
+                f"  {nr_n} NR contigs — unusually high for purified phage "
+                "(expected 1–{_MAX_CONTIGS_WARN}); "
+                "check for contamination or consider stricter host removal."
             )
     except (TypeError, ValueError):
         pass
@@ -472,12 +575,24 @@ def _print_completion_panel(
     mh_n = stats.get("mh_n", "?")
     nr_n = stats.get("nr_n", "?")
     pct  = stats.get("pct_redundant", "?")
+    n50  = stats.get("nr_n50", 0)
 
     text = Text()
     text.append("✓ ", style="bold green")
     text.append(f"SPAdes={sp_n} + MEGAHIT={mh_n} contigs  →  ", style="dim white")
     text.append(f"{nr_n}", style="bold green")
-    text.append(f" NR contigs  (−{pct} redundant)\n\n", style="cyan")
+    text.append(f" NR contigs  (−{pct} redundant)\n", style="cyan")
+    try:
+        n50_int = int(n50)
+        style = (
+            "bold green"  if n50_int >= _N50_GOOD else
+            "bold yellow" if n50_int >= _N50_WARN else
+            "bold red"
+        )
+        text.append(f"  NR N50 = ", style="dim white")
+        text.append(f"{n50_int:,} bp\n\n", style=style)
+    except (TypeError, ValueError):
+        text.append("\n")
     text.append("NR contigs : ", style="dim white")
     text.append(str(nr_fa) + "\n", style="white")
     text.append("Summary    : ", style="dim white")
@@ -504,13 +619,7 @@ def _save_tsv(
     nr_fa:     Optional[Path],
     path:      Path,
 ) -> None:
-    """
-    Write / update the assembly summary TSV.
-
-    Existing rows are preserved and migrated to the current schema
-    (missing columns filled with empty strings), so re-running with
-    an older TSV does not lose previous samples.
-    """
+    """Write / update the assembly summary TSV."""
     def _s(fa):
         if fa and fa.exists() and fa.stat().st_size > 0:
             s = fasta_stats(fa)
