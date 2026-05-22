@@ -1,16 +1,22 @@
 project: PhageFlow
-version: "3.1.0"
-mode: purified_phage
+version: "0.1.0"
 
 samples_file: config/samples.tsv
 
-threads: 24
+# Threads: comment out or remove to use auto-detection (90% of logical CPUs).
+# threads: 24
+
 memory_gb: 32
 
+# Output directories. Relative paths are resolved from workdir.
+# These can be overridden at runtime with -o / --reports-dir.
+# dirs:
+#   results: /absolute/path/to/results
+#   reports: /absolute/path/to/reports
+
 dirs:
-  databases: databases
-  results:   results
-  reports:   reports
+  results: results
+  reports: reports
 
 databases:
   checkv:   databases/checkv_db/checkv-db-v1.5
@@ -21,30 +27,68 @@ databases:
   kraken2:  databases/k2_db
 
 envs:
-  main:      phageflow
-  genomad:   genomad
-  phold:     phold
-  lifecycle: bacphlip
+  main: phageflow
 
 assembly:
+  # k-mers for SPAdes and MEGAHIT (same value for reproducibility).
+  # PE150: max effective k ≈ 127. Extending to 141 gives marginal gain.
+  # Bankevich et al. 2012, J Comp Biol 19:455.
   kmers:      "21,33,55,77,99,127"
   min_length: 200
 
 genomad:
-  min_score:          0.7
-  min_virus_hallmarks: 0
+  # 0.7 ≈ 97% precision. Camargo et al. 2023, Nat Biotechnol.
+  min_score:            0.7
+  min_virus_hallmarks:  0
+  # Sensitivity: 4.2 (default). 5.7–7.5 to detect distant relatives.
+  sensitivity:          4.2
+  # Splits: 0 = geNomad auto memory management. Do NOT change unless OOM.
+  # This is a memory parameter, NOT a parallelism parameter.
+  splits:               0
+
+  # Borderline rescue for novel lineages (score below min_score but
+  # clearly phage based on size). Camargo et al. 2023.
+  rescue_min_score:     0.4
+  rescue_min_length_bp: 10000
+
+  # Score calibration: adjusts scores for virome composition.
+  # Reduces false negatives in novel lineages. Camargo et al. 2023.
+  enable_score_calibration: true
+  composition:              virome
+
+  # Taxonomy at genus/species level (below family).
+  # Required for biologically meaningful co-binning in Module 05.
+  lenient_taxonomy: true
+
+  # Provirus finding disabled: purified phage preparations should not
+  # contain bacterial chromosomes. If proviruses appear, host removal failed.
+  disable_find_proviruses: true
 
 checkv:
-  min_completeness:   50      # umbral MQ para annotation_ready
-  min_viral_genes:    1       # rescate LQ: mín. genes virales → drafts/
-  length_rescue:      10000   # rescate ND moderado (10kb + ≥1 gen viral) → drafts/
-  min_contig_bp:      1500    # filtro global: contigs < N bp descartados
-  large_nd_rescue_bp: 30000   # ND ≥ N bp + ≥1 gen viral → annotation_ready (no drafts)
-  min_bin_rescue_bp:  30000   # suma total del bin de drafts ≥ N bp → annotation_ready
-  min_gene_density:   0.5
+  # Nayfach et al. 2021, Nat Biotechnol 39:578.
+  min_completeness:   50      # MQ ≥50% → annotation_ready/
+  min_viral_genes:    1       # LQ rescue: ≥1 viral gene → drafts/
+  length_rescue:      10000   # ND ≥10kb + ≥1 gene → drafts/
+  min_contig_bp:      1500    # contigs shorter than this are discarded
+  large_nd_rescue_bp: 30000   # ND ≥30kb + ≥1 gene → annotation_ready/ (myovirus rule)
+  min_bin_rescue_bp:  30000   # draft bin (same taxon) ≥30kb → annotation_ready/
+  min_gene_density:   0.5     # genes/kb minimum for density-based rescue
+
+  # Concatemer / genome copy detection.
+  # Contigs exceeding these thresholds are flagged and excluded.
+  # CheckV PyPI documentation.
+  max_kmer_freq:    1.5
+  max_genome_copies: 1.5
 
 annotate:
-  phold_gpu:           true   # --foldseek_gpu; set false for --cpu fallback
-  phold_finetune:      true   # phage-finetuned ProstT5 model (recommended)
-  phold_batch_size:    1      # ProstT5 batch size; increase on GPU (e.g. 4-8)
-  phynteny_confidence: 0.7    # confidence threshold for Phynteny predictions
+  # Phold
+  phold_gpu:         true   # --foldseek_gpu; false → --cpu
+  phold_finetune:    true   # phage-finetuned ProstT5 model (recommended)
+  phold_batch_size:  1      # ESM batch size; increase on GPU (4–8)
+  phold_sensitivity: 9.5   # Foldseek sensitivity; 7.5 is ~2x faster
+  # Phynteny
+  phynteny_confidence: 0.8  # tool source default (calibrated confidence)
+  # Genetic code default: 11 (standard phage/bacterial).
+  # Overridden per candidate from geNomad _virus_genes.tsv when different.
+  # Code 15 = crAss-like (TAG→Gln). Pharokka -g flag.
+  genetic_code: 11
