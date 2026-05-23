@@ -53,7 +53,14 @@ def run(
     rpt_dir  = cfg.reports(STEP) / sample_id
     host_dir = rpt_dir / "host_genomes"
     tmp_dir  = out_dir / "tmp" / sample_id
-    mkdirs(out_dir, rpt_dir, host_dir, tmp_dir)
+
+    # Determine mode before creating directories so host_dir is only
+    # created when bwa-mem2 will actually be used.
+    use_bwa = bool(host_file or accessions or accessions_file)
+    if use_bwa:
+        mkdirs(out_dir, rpt_dir, host_dir, tmp_dir)
+    else:
+        mkdirs(out_dir, rpt_dir, tmp_dir)   # host_dir unused in Kraken2 mode
 
     r1_out        = out_dir / f"{sample_id}_R1.fastq.gz"
     r2_out        = out_dir / f"{sample_id}_R2.fastq.gz"
@@ -68,7 +75,6 @@ def run(
         log_info("  Already processed — skipping  (--force to re-run)")
         return r1_out, r2_out, singleton_out
 
-    use_bwa = bool(host_file or accessions or accessions_file)
     active_warnings: list[str] = []
     always = list(cfg.host_removal.always_include_accessions or [])
 
@@ -111,12 +117,21 @@ def run(
 
         if use_bwa:
             progress.update(task, description="[1/3] bwa-mem2 — resolving reference + index")
-            fastas = _resolve_fastas(host_file, accessions, accessions_file,
-                                     host_dir, rpt_dir, always)
-            if not fastas:
-                log_error("  No host FASTAs resolved.")
-                raise FileNotFoundError("No host reference FASTAs found.")
-            _build_index(fastas, combined, rpt_dir, force)
+            idx = Path(str(combined) + ".bwt.2bit.64")
+            if idx.exists() and not force:
+                # Index cached from previous run — skip download and rebuild.
+                # Re-run with --force to refresh reference genomes.
+                log_info("  [bwa-mem2] index cached — skipping download + rebuild  (--force to refresh)")
+            else:
+                fastas = _resolve_fastas(host_file, accessions, accessions_file,
+                                         host_dir, rpt_dir, always)
+                if not fastas:
+                    log_error("  No host FASTAs resolved.")
+                    raise FileNotFoundError("No host reference FASTAs found.")
+                _build_index(fastas, combined, rpt_dir, force)
+                # Remove raw NCBI download artifacts — FASTAs already incorporated
+                # into combined_hosts.fasta. Keeps host_genomes/ clean.
+                _cleanup_ncbi_download(host_dir)
             progress.advance(task)
 
             progress.update(task, description="[2/3] bwa-mem2|sort-n|fastq — streaming pipeline")
@@ -165,6 +180,10 @@ def run(
                 progress.advance(task)
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
+    try:
+        tmp_dir.parent.rmdir()   # remove tmp/ parent only if now empty
+    except OSError:
+        pass
 
     mode = "bwa-mem2" if use_bwa else "kraken2"
     _validate_output(r1_out, r2_out, singleton_out, stats, active_warnings)
@@ -276,6 +295,21 @@ def _build_index(fastas: List[Path], combined: Path, rpt_dir: Path, force: bool)
 
 
 # ── bwa-mem2 streaming pipeline ───────────────────────────────────────────────
+
+def _cleanup_ncbi_download(host_dir: Path) -> None:
+    """Remove raw NCBI download folder after combined FASTA is built.
+
+    Keeps: combined_hosts.fasta + all bwa-mem2 index files.
+    Removes: ncbi_dataset/ (individual FASTAs + NCBI metadata).
+
+    The individual FASTAs are redundant once incorporated into combined_hosts.fasta.
+    On --force re-runs, datasets downloads fresh copies.
+    """
+    ncbi_dir = host_dir / "ncbi_dataset"
+    if ncbi_dir.exists():
+        shutil.rmtree(ncbi_dir, ignore_errors=True)
+        log_info("  [cleanup] ncbi_dataset/ removed — combined FASTA retained")
+
 
 def _run_bwa_pipeline(
     sample_id, r1, r2, combined, r1_out, r2_out, singleton_out,
@@ -476,6 +510,7 @@ def _level_b_postfilter(
 
     combined_pf = pf_dir / "combined_postfilter.fasta"
     _build_index(fastas, combined_pf, rpt_dir, force)
+    _cleanup_ncbi_download(pf_dir)   # remove per-taxid raw downloads after index build
     n_k2 = _count_reads_fastq(r1_k2, cfg.threads)
     log_info(f"  [Level B] bwa-mem2 post-filter vs {len(fastas)} genome(s) "
              f"({len(taxids)} bacterial taxon(s) > {min_pct}%)")

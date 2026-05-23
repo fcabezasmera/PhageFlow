@@ -1,98 +1,85 @@
 """PhageFlow Module 03 — De novo assembly.
 
-Goal: produce complete or near-complete phage genome contigs for downstream
-CheckV Complete/High-quality classification (Nayfach et al. 2021).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Strategy: two-assembler + NR reduction
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Tools and parameters (literature-based for purified phage sequencing):
+SPAdes (primary)
+  --isolate         Optimised for high-coverage isolates; disables
+                    BayesHammer error correction. >200× coverage:
+                    correction collapses real SNPs (Roux et al. 2019).
+  --only-assembler  Implied by --isolate. NOT passed explicitly — SPAdes raises
+                    an error when both flags are provided simultaneously.
+  --s1 singletons   DTR/ITR boundary reads from bwa-mem2 host removal.
+                    Improves terminal coverage → CheckV Complete.
+                    Nayfach et al. 2021, Nat Biotechnol 39:578.
 
-SPAdes v3.15+ (Bankevich et al. 2012, Journal of Computational Biology 19:455):
-    --isolate
-        Isolate mode: optimised for high-coverage single-organism preparations.
-        Avoids the variable-coverage heuristics in --meta (designed for
-        metagenomes spanning 0.1×–10 000×) that can fragment the De Bruijn
-        graph in uniform high-coverage phage data.
-        (Prjibelski et al. 2020, Current Protocols; Bankevich et al. 2012)
+MEGAHIT (secondary, always runs)
+  --no-mercy        Disables low-depth rescue at high coverage.
+                    Reduces chimeric contigs. Li et al. 2015.
+  --min-count 2     Discard k-mers seen only once (sequencing errors).
+  Does NOT support --s1; singletons omitted for MEGAHIT.
 
-    --only-assembler
-        Skip BayesHammer error correction — required at >200× coverage
-        (BayesHammer collapses true variants into consensus, losing
-        biological diversity in tail fiber / receptor binding proteins).
-        Compatible with --isolate (SPAdes ≥3.15).
-        (Roux et al. 2019, eLife 8:e42923)
+NR reduction (cd-hit-est)
+  -c 1.00           100% sequence identity.
+  -aS 0.85          Shorter sequence must be ≥85% covered by longer.
+  Removes near-identical contigs produced by both assemblers.
+  Fu et al. 2012, Bioinformatics 28:3150.
 
-    -k 21,33,55,77,99,127
-        Multiple k-mers ensure coverage of both short repeats (k=21)
-        and long unique regions (k=127). Standard for PE150 phage data
-        (Bankevich et al. 2012; SPAdes manual).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Steps
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    --s1 (singletons, optional)
-        Unpaired reads from host-removal step (reads whose pair aligned to host
-        but which are themselves unmapped). These represent phage fragments at
-        DTR/ITR boundaries; including them improves terminal coverage and raises
-        the probability of CheckV 'Complete' classification
-        (Nayfach et al. 2021, Nat Biotechnol 39:578).
+  [1/4] SPAdes assembly (with singletons if available)
+  [2/4] MEGAHIT assembly (paired reads only)
+  [3/4] Combine → filter min_length → cd-hit-est NR
+  [4/4] Stats + completion panel
 
-    Post-assembly length filter: contigs < min_length (default 200 bp) discarded.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Directories
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    Note: --cov-cutoff auto is INCOMPATIBLE with --isolate (SPAdes ≥3.15)
-    Note: contigs.fasta used (NOT scaffolds.fasta) — scaffolds introduce
-          artificial N-gaps that break ORF prediction in Pharokka/Phold.
+  results/03_assembly/
+      {sample_id}_spades/          ← SPAdes workspace (trimmed post-run)
+          scaffolds.fasta          ← kept
+          assembly_graph.gfa       ← kept
+          spades.log               ← kept
+      {sample_id}_megahit/         ← MEGAHIT workspace
+          {sample_id}.contigs.fa   ← MEGAHIT final contigs
+      {sample_id}_contigs.fasta    ← NR combined output (pipeline input)
 
-MEGAHIT v1.2+ (Li et al. 2015, Bioinformatics 31:1674):
-    --k-list {cfg.assembly.kmers}
-        Reuses the same k-mer list from config.yaml (default 21,33,55,77,99,127)
-        for reproducibility. Previously hardcoded; now synced with SPAdes.
-
-    --min-count 2
-        Minimum solid k-mer multiplicity — removes sequencing errors
-        without losing low-coverage genuine phage k-mers.
-
-    --no-mercy
-        Disable mercy k-mers at high coverage (>200×).
-        (Li et al. 2015)
-
-    --min-contig-len {cfg.assembly.min_length}
-        Consistent with SPAdes post-filter (default 200 bp).
-
-cd-hit-est (Fu et al. 2012, Bioinformatics 28:3150):
-    -c 1.00 : 100% sequence identity — removes exact duplicates only,
-              preserving biological SNP-level variants.
-    -aS 0.85 : ≥85% alignment coverage of the shorter sequence.
-               Changed from 1.00: with -aS 1.00, a MEGAHIT contig that is
-               95% the length of an equivalent SPAdes contig (same region,
-               100% identity) would NOT be dereplicated, creating functional
-               duplicates in downstream modules. -aS 0.85 eliminates these
-               while preserving genuine biological variants.
-               (Fu et al. 2012 — recommended for variable-length sequences)
+  reports/03_assembly/{sample_id}/
+      assembly_summary.tsv
+      {sample_id}_assembly.log
 """
 
 from __future__ import annotations
 import shutil
+import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from rich.panel import Panel
-from rich.text import Text
 from rich.progress import (
     Progress, SpinnerColumn, TextColumn,
     BarColumn, MofNCompleteColumn, TimeElapsedColumn,
 )
 
 from phageflow.utils.config import Config
-from phageflow.utils.logger import log_step, log_info, log_ok, log_warn, console
-from phageflow.utils.tools import require_tools, run_silent, human_size, mkdirs, fasta_stats
+from phageflow.utils.logger import (
+    log_step, log_info, log_ok, log_warn, log_error, console,
+)
+from phageflow.utils.tools import require_tools, run_silent, human_size, mkdirs
 
 STEP  = "03_assembly"
 TOOLS = ["spades.py", "megahit", "cd-hit-est"]
 
-# ── Thresholds ────────────────────────────────────────────────────────────────
-# For purified phage the goal is 1–5 contigs covering the full genome.
-_N50_GOOD         = 50_000  # N50 ≥ 50 kb: likely near-complete assembly
-_N50_WARN         = 20_000  # N50 < 20 kb: fragmented; CheckV Complete unlikely
-_N50_CRITICAL     = 5_000   # N50 < 5 kb:  severely fragmented; annotation unreliable
-_MAX_CONTIGS_WARN = 20      # >20 NR contigs unusual for purified phage
-_MAX_CONTIGS_CRIT = 100     # >100 NR contigs suggests assembly failure or contamination
-_MIN_CONTIGS      = 1
+# N50 threshold below which we warn (phage genomes are typically 20–200 kb)
+_N50_WARN  = 5_000
+# Contig size threshold above which we warn (suspicious for purified phage)
+_MAX_CONTIG_WARN = 500_000
+# Minimum reads to attempt assembly (fewer than this → very high failure risk)
+_MIN_READS_FOR_ASSEMBLY = 5_000
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -105,542 +92,570 @@ def run(
     s1:        Optional[Path] = None,
     force:     bool           = False,
 ) -> Path:
-    """
-    Assemble a single sample with SPAdes (--isolate) + MEGAHIT, then dereplicate.
+    """Assemble phage reads for a single sample.
 
     Parameters
     ----------
-    s1 : singletons FASTQ from host-removal (passed to SPAdes --s1).
-         Improves terminal DTR/ITR coverage → raises CheckV 'Complete' rate
-         (Nayfach et al. 2021). Pass None to skip.
+    r1, r2 : paired FASTQ (gzipped or plain) from host-removal step
+    s1     : singleton FASTQ from bwa-mem2 host-removal (optional)
+              passed as SPAdes --s1 to improve DTR/ITR boundary coverage
 
     Returns
     -------
-    nr_fa : Path to non-redundant contigs FASTA (input for geNomad)
+    Path to the NR combined contigs FASTA
     """
-    require_tools(*TOOLS)
-
     r1 = Path(r1); r2 = Path(r2)
-    out_dir = cfg.results(STEP)
-    rpt_dir = cfg.reports(STEP)
-    mkdirs(out_dir / "spades", out_dir / "megahit", out_dir / "combined", rpt_dir)
+    out_dir     = cfg.results(STEP)
+    rpt_dir     = cfg.reports(STEP) / sample_id
+    spades_dir  = out_dir / f"{sample_id}_spades"
+    megahit_dir = out_dir / f"{sample_id}_megahit"
+    contigs_out = out_dir / f"{sample_id}_contigs.fasta"
+    log_f       = rpt_dir / f"{sample_id}_assembly.log"
+    mkdirs(out_dir, rpt_dir)
 
-    nr_fa = out_dir / "combined" / f"{sample_id}_contigs_nr.fasta"
+    log_step(f"Module 03 — assembly  [{sample_id}]")
+    log_info(f"  R1 : {r1}  ({human_size(r1)})")
+    log_info(f"  R2 : {r2}  ({human_size(r2)})")
 
-    log_step(f"Module 03 — assembly [{sample_id}]")
-    _print_input_table(sample_id, r1, r2, s1)
-    log_info(f"  SPAdes   : --isolate --only-assembler  (Prjibelski et al. 2020; Roux et al. 2019)")
-    log_info(f"  MEGAHIT  : --no-mercy --min-count 2    (Li et al. 2015)")
-    log_info(f"  Min len  : {cfg.assembly.min_length} bp  |  k-mers: {cfg.assembly.kmers}")
-    log_info(f"  cd-hit-est: -c 1.00 -aS 0.85  (Fu et al. 2012)")
-    if s1 and Path(s1).exists() and Path(s1).stat().st_size > 0:
-        log_info(f"  Singletons: {s1}  ({human_size(Path(s1))}) → SPAdes --s1")
+    # Singletons: only use if the file is non-empty
+    use_s1 = bool(
+        s1 and Path(s1).exists() and Path(s1).stat().st_size > 0
+    )
+    if use_s1:
+        log_info(f"  S1 : {s1}  ({human_size(Path(s1))})  → SPAdes --s1")
     else:
-        log_info("  Singletons: none provided  (pass --s1 to include DTR/ITR boundary reads)")
+        log_info("  S1 : not provided or empty — DTR/ITR boundary reads absent")
 
-    # ── Pipeline steps ────────────────────────────────────────────────────────
-    sp_fa: Optional[Path] = None
-    mh_fa: Optional[Path] = None
+    if contigs_out.exists() and contigs_out.stat().st_size > 0 and not force:
+        log_info("  Already assembled — skipping  (--force to re-run)")
+        return contigs_out
+
+    require_tools(*TOOLS)
+    active_warnings: list[str] = []
 
     with Progress(
         SpinnerColumn(spinner_name="dots2"),
-        TextColumn("[bold cyan]{task.description:<48}"),
+        TextColumn("[bold cyan]{task.description:<60}"),
         BarColumn(bar_width=20, complete_style="cyan", finished_style="green"),
         MofNCompleteColumn(),
         TimeElapsedColumn(),
         console=console,
         transient=True,
     ) as progress:
-        task = progress.add_task("Initializing...", total=3)
+        task = progress.add_task("Initializing...", total=4)
 
-        # 1/3 — SPAdes + length filter
-        progress.update(task, description="[1/3] SPAdes    — de novo assembly (--isolate)")
-        sp_fa = _run_spades(cfg, sample_id, r1, r2, s1, out_dir, rpt_dir, force)
+        # ── Step 1: SPAdes ────────────────────────────────────────────────────
+        progress.update(task, description="[1/4] SPAdes  — isolate mode + singletons")
+        spades_ok = _run_spades(
+            r1, r2, s1 if use_s1 else None,
+            spades_dir, log_f, cfg.threads, cfg.memory_gb, force,
+        )
+        if not spades_ok:
+            msg = "SPAdes failed — assembly will use MEGAHIT output only."
+            log_warn(f"  {msg}")
+            active_warnings.append(msg)
         progress.advance(task)
 
-        # 2/3 — MEGAHIT
-        progress.update(task, description="[2/3] MEGAHIT   — de novo assembly")
-        mh_fa = _run_megahit(cfg, sample_id, r1, r2, out_dir, rpt_dir, force)
+        # ── Step 2: MEGAHIT ───────────────────────────────────────────────────
+        progress.update(task, description="[2/4] MEGAHIT — no-mercy high-coverage mode")
+        megahit_ok = _run_megahit(
+            r1, r2, megahit_dir, sample_id,
+            cfg.assembly.kmers, log_f, cfg.threads, force,
+        )
+        if not megahit_ok:
+            if not spades_ok:
+                log_error("  Both SPAdes and MEGAHIT failed — no contigs produced.")
+                raise RuntimeError(
+                    f"Assembly failed for {sample_id}: both assemblers returned non-zero."
+                )
+            msg = "MEGAHIT failed — using SPAdes contigs only."
+            log_warn(f"  {msg}")
+            active_warnings.append(msg)
         progress.advance(task)
 
-        # 3/3 — cd-hit-est dereplication
-        progress.update(task, description="[3/3] cd-hit-est — dereplication")
-        nr_fa = _run_cdhit(cfg, sample_id, sp_fa, mh_fa, out_dir, rpt_dir, force)
+        # ── Step 3: Combine + filter + NR ─────────────────────────────────────
+        progress.update(task, description="[3/4] cd-hit-est — combine + NR reduction")
+        stats = _combine_and_dereplicate(
+            spades_dir if spades_ok else None,
+            megahit_dir / f"{sample_id}.contigs.fa" if megahit_ok else None,
+            contigs_out, cfg.assembly.min_length,
+            cfg.threads, log_f, active_warnings,
+        )
         progress.advance(task)
 
-    # ── Metrics, display, save ────────────────────────────────────────────────
-    stats = _collect_stats(sp_fa, mh_fa, nr_fa)
-    _validate_output(sample_id, nr_fa, stats)
-    _save_tsv(sample_id, sp_fa, mh_fa, nr_fa, rpt_dir / "assembly_summary.tsv")
-    _print_summary_table(sample_id, stats)
-    _check_warnings(stats)
-    _print_completion_panel(sample_id, nr_fa, rpt_dir, stats)
+        # ── Step 4: Stats + panel ─────────────────────────────────────────────
+        progress.update(task, description="[4/4] Computing assembly stats")
+        _check_assembly_warnings(stats, active_warnings)
+        _save_tsv({**stats, "sample": sample_id,
+                   "kmers": cfg.assembly.kmers,
+                   "singletons_used": str(use_s1),
+                   "spades_ok": str(spades_ok),
+                   "megahit_ok": str(megahit_ok)},
+                  rpt_dir / "assembly_summary.tsv")
+        _print_completion_panel(
+            sample_id, contigs_out, rpt_dir, stats,
+            spades_ok, megahit_ok, use_s1, active_warnings,
+        )
+        progress.advance(task)
 
     log_step(f"Module 03 completed ✓  [{sample_id}]")
-    log_info(
-        f"  Next: phageflow viral-id --sample-id {sample_id} "
-        f"--contigs {nr_fa}"
-    )
-    return nr_fa
+    return contigs_out
 
 
-# ── Step implementations ──────────────────────────────────────────────────────
+# ── SPAdes ────────────────────────────────────────────────────────────────────
 
 def _run_spades(
-    cfg:       Config,
-    sample_id: str,
-    r1:        Path,
-    r2:        Path,
-    s1:        Optional[Path],
-    out_dir:   Path,
-    rpt_dir:   Path,
-    force:     bool,
-) -> Path:
+    r1: Path, r2: Path, s1: Optional[Path],
+    out_dir: Path, log_f: Path,
+    threads: int, memory_gb: int, force: bool,
+) -> bool:
+    """Run SPAdes in isolate mode.
+
+    Returns True on success, False on failure.
+
+    --isolate       : assembly preset for high-coverage isolates.
+                      Disables all error correction; starts directly from reads.
+                      Prjibelski et al. 2020, Curr Protocols Bioinf 70:e102.
+    Note: --only-assembler is implied by --isolate and must NOT be passed explicitly.
+          SPAdes raises "Error: option not compatible" when both are provided.
+                      At >200× coverage, BayesHammer collapses real variants.
+                      Roux et al. 2019, eLife 8:e42923.
+    --s1 singletons : unpaired reads (DTR/ITR boundary reads from bwa-mem2).
+                      Nayfach et al. 2021, Nat Biotechnol 39:578.
     """
-    Run SPAdes in --isolate mode with optional singleton support.
+    scaffolds = out_dir / "scaffolds.fasta"
+    if scaffolds.exists() and scaffolds.stat().st_size > 0 and not force:
+        log_info("  [SPAdes] already assembled — skipping")
+        return True
 
-    --isolate is preferred over --meta for purified phage because:
-      - --meta applies variable-coverage heuristics (designed for 0.1×–10 000×
-        metagenomes) that can fragment the De Bruijn graph at the uniformly
-        high coverage typical of phage preparations (Prjibelski et al. 2020).
-      - --isolate uses an optimised graph simplification for single-organism
-        high-coverage data, producing longer contigs.
+    if out_dir.exists() and force:
+        shutil.rmtree(out_dir, ignore_errors=True)
 
-    --only-assembler skips BayesHammer error correction, which is
-    counterproductive at >200× (collapses biological variants).
-    Compatible with --isolate in SPAdes ≥3.15 (Roux et al. 2019).
-
-    --s1 passes singleton reads from host removal as unpaired input.
-    SPAdes incorporates them in the De Bruijn graph, improving coverage
-    at DTR/ITR boundaries (Nayfach et al. 2021).
-    """
-    sp_dir = out_dir / "spades" / sample_id
-    sp_raw = sp_dir / "contigs.fasta"
-    sp_fa  = sp_dir / "contigs_filtered.fasta"
-    mkdirs(sp_dir)
-
-    if sp_fa.exists() and sp_fa.stat().st_size > 0 and not force:
-        log_info("  [SPAdes] already exists — skipping")
-        return sp_fa
+    # Ensure the parent directory exists. SPAdes creates its own output dir,
+    # but some versions remove the (empty) parent on failure, which would
+    # break MEGAHIT (uses os.mkdir, not os.makedirs).
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         "spades.py",
-        "--pe1-1", str(r1), "--pe1-2", str(r2),
-        "--isolate",          # ← purified phage high-coverage mode
-        "--only-assembler",   # ← skip error correction at >200× (Roux et al. 2019)
-        "-k",        cfg.assembly.kmers,
-        "--threads", str(cfg.threads),
-        "--memory",  str(cfg.memory_gb),
-        "-o",        str(sp_dir),
+        "--pe1-1", str(r1),
+        "--pe1-2", str(r2),
+        "-k", "21,33,55,77,99,127",
+        "--isolate",
+        "--phred-offset", "33",  # --only-assembler implied by --isolate; do NOT pass both
+        "-t", str(threads),
+        "-m", str(memory_gb),
+        "-o", str(out_dir),
     ]
-
-    # Singletons from host-removal → improve DTR/ITR boundary coverage
-    s1_path = Path(s1) if s1 else None
-    if s1_path and s1_path.exists() and s1_path.stat().st_size > 0:
-        cmd += ["--s1", str(s1_path)]
-        log_info(
-            f"  [SPAdes] --s1 {s1_path.name} included "
-            f"({human_size(s1_path)}) — DTR/ITR boundary coverage "
-            f"(Nayfach et al. 2021)"
-        )
-    else:
-        log_info("  [SPAdes] --isolate --only-assembler | no singletons")
+    if s1 and Path(s1).exists():
+        cmd += ["--s1", str(s1)]
 
     try:
-        run_silent(cmd, log_file=rpt_dir / f"{sample_id}_spades.log")
+        run_silent(cmd, log_file=log_f)
     except Exception as e:
-        log_warn(f"  [SPAdes] warning: {e}")
+        log_warn(f"  [SPAdes] non-zero exit: {e}")
+        return False
 
-    if sp_raw.exists() and sp_raw.stat().st_size > 0:
-        n_raw, n_kept = _filter_fasta(sp_raw, sp_fa, cfg.assembly.min_length)
-        log_ok(
-            f"  [SPAdes] length filter ≥{cfg.assembly.min_length}bp: "
-            f"{n_raw} → {n_kept} contigs  (discarded {n_raw - n_kept})"
+    if not scaffolds.exists() or scaffolds.stat().st_size == 0:
+        log_warn("  [SPAdes] scaffolds.fasta missing or empty after run")
+        return False
+
+    s = _fasta_stats(scaffolds)
+    log_ok(f"  [SPAdes] {s['n']:,} scaffolds  N50={s['n50_bp']:,} bp  "
+           f"largest={s['largest_bp']:,} bp")
+
+    # Cleanup large intermediate directories — keep useful output only.
+    _cleanup_spades(out_dir)
+    return True
+
+
+def _cleanup_spades(out_dir: Path) -> None:
+    """Remove SPAdes intermediate files to reclaim disk space.
+
+    Keeps: scaffolds.fasta, assembly_graph.gfa, spades.log
+    Removes: corrected/ (BayesHammer reads), K21/ ... K127/ (k-mer graphs),
+             misc/, pipeline_state/, tmp/
+    """
+    keep = {"scaffolds.fasta", "assembly_graph.gfa", "assembly_graph.fastg",
+            "spades.log", "contigs.fasta", "params.txt"}
+    for child in list(out_dir.iterdir()):
+        if child.name not in keep:
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+    log_info("  [SPAdes] intermediate files removed (scaffolds.fasta + graph retained)")
+
+
+# ── MEGAHIT ───────────────────────────────────────────────────────────────────
+
+def _megahit_supports_klist() -> bool:
+    """Check if the installed MEGAHIT supports --k-list (requires ≥ 1.2.9).
+
+    MEGAHIT < 1.2 uses --k-min / --k-max / --k-step instead of --k-list.
+    We probe by running megahit --help and looking for the flag.
+    """
+    try:
+        r = subprocess.run(
+            ["megahit", "--help"],
+            capture_output=True, text=True, timeout=10,
         )
-    else:
-        log_warn("  [SPAdes] no assembly output — check log")
-
-    return sp_fa
+        return "--k-list" in (r.stdout + r.stderr)
+    except Exception:
+        return False
 
 
 def _run_megahit(
-    cfg:       Config,
-    sample_id: str,
-    r1:        Path,
-    r2:        Path,
-    out_dir:   Path,
-    rpt_dir:   Path,
-    force:     bool,
-) -> Path:
+    r1: Path, r2: Path,
+    out_dir: Path, prefix: str,
+    kmers: str, log_f: Path,
+    threads: int, force: bool,
+) -> bool:
+    """Run MEGAHIT for high-coverage phage reads.
+
+    Returns True on success, False on failure.
+
+    --no-mercy   : disables k-mer rescue at very low depth.
+                   At high coverage (>200×), low-depth k-mers are errors,
+                   not real variation. Li et al. 2015, Bioinformatics 31:1674.
+    --min-count 2: discard k-mers seen only once.
+                   Removes sequencing errors without losing real k-mers.
+    --k-list     : version-detected. MEGAHIT ≥1.2.9 supports --k-list with
+                   arbitrary comma-separated odd k-mers. Older versions use
+                   --k-min/--k-max/--k-step instead.
     """
-    Run MEGAHIT assembly.
+    final_contigs = out_dir / f"{prefix}.contigs.fa"
+    if final_contigs.exists() and final_contigs.stat().st_size > 0 and not force:
+        log_info("  [MEGAHIT] already assembled — skipping")
+        return True
 
-    k-list is read from cfg.assembly.kmers (same as SPAdes) for reproducibility.
-    Previously hardcoded as "21,29,39,59,79,99,119,141", which diverged from
-    the config value and was not user-configurable.
+    # MEGAHIT fails if the output directory exists
+    if out_dir.exists():
+        shutil.rmtree(out_dir, ignore_errors=True)
 
-    MEGAHIT and SPAdes use the same comma-separated k-mer format; the config
-    default "21,33,55,77,99,127" is valid for both tools.
-    (Li et al. 2015, Bioinformatics 31:1674)
-    """
-    mh_dir = out_dir / "megahit" / sample_id
-    mh_fa  = mh_dir / "final.contigs.fa"
+    # MEGAHIT uses os.mkdir (not os.makedirs) internally: the parent must
+    # already exist or MEGAHIT raises FileNotFoundError.
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    if mh_fa.exists() and mh_fa.stat().st_size > 0 and not force:
-        log_info("  [MEGAHIT] already exists — skipping")
-        return mh_fa
-
-    if mh_dir.exists():
-        shutil.rmtree(mh_dir)
-    mh_dir.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        run_silent([
-            "megahit",
-            "-1", str(r1), "-2", str(r2),
-            "-o",               str(mh_dir),
-            "--k-list",         cfg.assembly.kmers,   # ← synced with config (was hardcoded)
-            "--min-count",      "2",
-            "--no-mercy",
-            "--min-contig-len", str(cfg.assembly.min_length),
-            "-t",               str(cfg.threads),
-        ], log_file=rpt_dir / f"{sample_id}_megahit.log")
-        log_ok("  [MEGAHIT] assembly complete")
-    except Exception as e:
-        log_warn(f"  [MEGAHIT] warning: {e}")
-
-    return mh_fa
-
-
-def _run_cdhit(
-    cfg:       Config,
-    sample_id: str,
-    sp_fa:     Optional[Path],
-    mh_fa:     Optional[Path],
-    out_dir:   Path,
-    rpt_dir:   Path,
-    force:     bool,
-) -> Path:
-    """
-    Merge SPAdes + MEGAHIT contigs and dereplicate.
-
-    Parameters
-    ----------
-    -c 1.00  : 100% sequence identity — only exact duplicates collapsed.
-    -aS 0.85 : ≥85% alignment coverage of the shorter sequence.
-
-    Rationale for -aS 0.85 (changed from 1.00):
-        With -aS 1.00, two contigs must be nearly identical in length to be
-        considered duplicates. A MEGAHIT contig covering 95% of an equivalent
-        SPAdes contig (same genomic region, 100% identity) would NOT be
-        dereplicated, producing functional duplicate candidates in downstream
-        CheckV/geNomad modules. -aS 0.85 removes these while preserving
-        genuine biological variants (SNPs, indels).
-        (Fu et al. 2012, Bioinformatics 28:3150 — recommended for
-        variable-length sequence dereplication)
-    """
-    nr_fa  = out_dir / "combined" / f"{sample_id}_contigs_nr.fasta"
-    tmp_fa = out_dir / "combined" / f"{sample_id}_all_tmp.fasta"
-
-    if nr_fa.exists() and nr_fa.stat().st_size > 0 and not force:
-        log_info("  \\[cd-hit-est] already exists — skipping")
-        return nr_fa
-
-    n_sp = n_mh = 0
-    with open(tmp_fa, "w") as out:
-        if sp_fa and sp_fa.exists():
-            with open(sp_fa) as f:
-                for line in f:
-                    if line.startswith(">"):
-                        out.write(f">{sample_id}_sp_{line[1:]}")
-                        n_sp += 1
-                    else:
-                        out.write(line)
-        if mh_fa and mh_fa.exists():
-            with open(mh_fa) as f:
-                for line in f:
-                    if line.startswith(">"):
-                        out.write(f">{sample_id}_mh_{line[1:]}")
-                        n_mh += 1
-                    else:
-                        out.write(line)
-
-    n_input = n_sp + n_mh
-    if n_input == 0:
-        log_warn("  [cd-hit-est] no contigs from either assembler")
-        return nr_fa
-
-    try:
-        run_silent([
-            "cd-hit-est",
-            "-i", str(tmp_fa), "-o", str(nr_fa),
-            "-c", "1.00",
-            "-aS", "0.85",    # ← was 1.00; correct for variable-length dedup
-            "-n", "10", "-d", "0",
-            "-T", str(cfg.threads),
-            "-M", str(cfg.memory_gb * 1000),
-        ], log_file=rpt_dir / f"{sample_id}_cdhit.log")
-        log_ok("  \\[cd-hit-est] dereplication complete")
-    except Exception as e:
-        log_warn(f"  \\[cd-hit-est] warning: {e}")
-    finally:
-        tmp_fa.unlink(missing_ok=True)
-        Path(str(nr_fa) + ".clstr").unlink(missing_ok=True)
-
-    return nr_fa
-
-
-# ── Validation ────────────────────────────────────────────────────────────────
-
-def _validate_output(sample_id: str, nr_fa: Path, stats: dict) -> None:
-    """Warn if the NR FASTA is missing or empty after assembly."""
-    if not nr_fa.exists() or nr_fa.stat().st_size == 0:
-        log_warn(f"  validate · NR contigs file missing or empty: {nr_fa}")
-        return
-
-    n = stats.get("nr_n", 0)
-    if n < _MIN_CONTIGS:
-        log_warn(
-            f"  validate · 0 NR contigs assembled — "
-            "check read quality and host removal step."
-        )
+    # Build k-mer flags depending on MEGAHIT version
+    kmer_vals = [int(k) for k in kmers.split(",") if k.strip().isdigit()]
+    if _megahit_supports_klist():
+        kmer_flags = ["--k-list", kmers]
     else:
-        log_ok(f"  validate · {n} NR contigs — OK")
+        # Fallback for MEGAHIT < 1.2.9: use min/max/step
+        k_min = str(min(kmer_vals))
+        k_max = str(max(kmer_vals))
+        # Step: mode of differences between consecutive k-mers
+        diffs = [b - a for a, b in zip(kmer_vals, kmer_vals[1:])]
+        k_step = str(min(diffs)) if diffs else "12"
+        kmer_flags = ["--k-min", k_min, "--k-max", k_max, "--k-step", k_step]
+        log_info(f"  [MEGAHIT] legacy k-mer flags: {' '.join(kmer_flags)}")
+
+    cmd = [
+        "megahit",
+        "-1", str(r1),
+        "-2", str(r2),
+        *kmer_flags,
+        "--min-count", "2",
+        "--no-mercy",
+        "--min-contig-len", "200",
+        "-t", str(threads),
+        "-o", str(out_dir),
+        "--out-prefix", prefix,
+    ]
+    try:
+        run_silent(cmd, log_file=log_f)
+    except Exception as e:
+        log_warn(f"  [MEGAHIT] non-zero exit: {e}")
+        return False
+
+    if not final_contigs.exists() or final_contigs.stat().st_size == 0:
+        log_warn("  [MEGAHIT] contigs file missing or empty after run")
+        return False
+
+    s = _fasta_stats(final_contigs)
+    log_ok(f"  [MEGAHIT] {s['n']:,} contigs  N50={s['n50_bp']:,} bp  "
+           f"largest={s['largest_bp']:,} bp")
+    return True
 
 
-# ── Stats collection ──────────────────────────────────────────────────────────
+# ── Combine + filter + NR ─────────────────────────────────────────────────────
 
-def _collect_stats(
-    sp_fa: Optional[Path],
-    mh_fa: Optional[Path],
-    nr_fa: Optional[Path],
+def _combine_and_dereplicate(
+    spades_dir:    Optional[Path],
+    megahit_fa:    Optional[Path],
+    contigs_out:   Path,
+    min_length:    int,
+    threads:       int,
+    log_f:         Path,
+    active_warnings: list[str],
 ) -> dict:
-    """Gather fasta_stats for each assembler output into a flat dict."""
-    def _s(fa):
-        if fa and fa.exists() and fa.stat().st_size > 0:
-            return fasta_stats(fa)
-        return {"n": 0, "total_bp": 0, "largest_bp": 0, "n50": 0}
+    """Combine SPAdes + MEGAHIT contigs, filter by length, run cd-hit-est NR.
 
-    sp = _s(sp_fa)
-    mh = _s(mh_fa)
-    nr = _s(nr_fa)
+    Returns assembly stats dict for the final NR FASTA.
 
-    n_input = sp["n"] + mh["n"]
-    redund  = n_input - nr["n"]
-    pct_red = f"{redund / n_input * 100:.1f}%" if n_input else "N/A"
+    cd-hit-est parameters
+    ---------------------
+    -c 1.00 : 100% sequence identity required (exact duplicates only)
+    -aS 0.85: shorter seq must be ≥85% covered (removes near-contained seqs)
+    -n 8    : word length for 100% identity (recommended by cd-hit-est docs)
+    -d 0    : no description length limit in output headers
+    -M 0    : no memory limit (use all available)
+    -p 1    : print alignment overlap in cluster file
+    Reference: Fu et al. 2012, Bioinformatics 28:3150.
+    """
+    # Collect input FASTAs
+    inputs: list[tuple[str, Path]] = []
+    if spades_dir:
+        sp_fa = spades_dir / "scaffolds.fasta"
+        if sp_fa.exists() and sp_fa.stat().st_size > 0:
+            inputs.append(("SPAdes", sp_fa))
+    if megahit_fa and megahit_fa.exists() and megahit_fa.stat().st_size > 0:
+        inputs.append(("MEGAHIT", megahit_fa))
+
+    if not inputs:
+        raise RuntimeError("No contig FASTA files found from either assembler.")
+
+    # Combined FASTA (temporary) with source tag in header
+    combined_fa  = contigs_out.parent / f"{contigs_out.stem}_combined_raw.fasta"
+    filtered_fa  = contigs_out.parent / f"{contigs_out.stem}_filtered.fasta"
+    cdhit_prefix = contigs_out.parent / f"{contigs_out.stem}_cdhit"
+
+    n_raw: dict[str, int] = {}
+    with open(combined_fa, "w") as out:
+        for source, fa in inputs:
+            n = _write_tagged_fasta(fa, out, tag=source, min_len=min_length)
+            n_raw[source] = n
+            log_info(f"  [{source}] {n:,} contigs ≥{min_length} bp added to pool")
+
+    total_raw = sum(n_raw.values())
+    if total_raw == 0:
+        msg = f"No contigs ≥{min_length} bp from any assembler."
+        log_warn(f"  {msg}")
+        active_warnings.append(msg)
+        combined_fa.unlink(missing_ok=True)
+        contigs_out.write_text("")
+        return {"n_spades": "0", "n_megahit": "0", "n_combined": "0",
+                "n_final": "0", "total_bp": "0",
+                "largest_bp": "0", "n50_bp": "0"}
+
+    # cd-hit-est NR reduction
+    run_silent(
+        [
+            "cd-hit-est",
+            "-i", str(combined_fa),
+            "-o", str(cdhit_prefix),
+            "-c", "1.00",
+            "-aS", "0.85",
+            "-n", "8",
+            "-d", "0",
+            "-T", str(threads),
+            "-M", "0",
+            "-p", "1",
+        ],
+        log_file=log_f,
+    )
+
+    # Rename cdhit output to final path
+    if cdhit_prefix.exists():
+        cdhit_prefix.rename(contigs_out)
+    else:
+        log_warn("  [cd-hit-est] output not found — using unfiltered combined FASTA")
+        combined_fa.rename(contigs_out)
+
+    # Clean up temporaries
+    for p in [combined_fa, filtered_fa,
+              Path(str(cdhit_prefix) + ".clstr"),
+              Path(str(contigs_out)  + ".clstr")]:
+        p.unlink(missing_ok=True)
+
+    stats = _fasta_stats(contigs_out)
+    log_ok(f"  [NR] {total_raw:,} → {stats['n']:,} contigs after deduplication")
 
     return {
-        "sp_n":          sp["n"],
-        "sp_largest":    sp["largest_bp"],
-        "sp_n50":        sp["n50"],
-        "sp_total":      sp["total_bp"],
-        "mh_n":          mh["n"],
-        "mh_largest":    mh["largest_bp"],
-        "mh_n50":        mh["n50"],
-        "mh_total":      mh["total_bp"],
-        "nr_n":          nr["n"],
-        "nr_largest":    nr["largest_bp"],
-        "nr_n50":        nr["n50"],
-        "nr_total":      nr["total_bp"],
-        "pct_redundant": pct_red,
+        "n_spades":  str(n_raw.get("SPAdes",  0)),
+        "n_megahit": str(n_raw.get("MEGAHIT", 0)),
+        "n_combined": str(total_raw),
+        "n_final":   str(stats["n"]),
+        "total_bp":  str(stats["total_bp"]),
+        "largest_bp": str(stats["largest_bp"]),
+        "n50_bp":    str(stats["n50_bp"]),
     }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+def _write_tagged_fasta(
+    in_fa: Path, out_fh, tag: str, min_len: int
+) -> int:
+    """Write contigs ≥ min_len to out_fh, adding [tag] prefix to headers.
 
-def _filter_fasta(src: Path, dst: Path, min_len: int) -> tuple[int, int]:
-    """Write sequences from src to dst keeping only those >= min_len bp."""
-    seqs: List[tuple[str, str]] = []
-    header = seq = ""
+    Returns number of contigs written.
+    """
+    n = 0
+    header = ""
+    seq_parts: list[str] = []
 
-    with open(src) as f:
+    def _flush():
+        nonlocal n
+        if not header:
+            return
+        seq = "".join(seq_parts)
+        if len(seq) >= min_len:
+            # Inject assembler tag into the contig header
+            bare = header[1:].strip()
+            out_fh.write(f">{tag}|{bare}\n{seq}\n")
+            n += 1
+
+    with open(in_fa) as f:
         for line in f:
             line = line.rstrip()
             if line.startswith(">"):
-                if header:
-                    seqs.append((header, seq))
-                header, seq = line, ""
+                _flush()
+                header = line
+                seq_parts = []
             else:
-                seq += line
-    if header:
-        seqs.append((header, seq))
-
-    kept = [(h, s) for h, s in seqs if len(s) >= min_len]
-
-    with open(dst, "w") as f:
-        for h, s in kept:
-            f.write(h + "\n" + s + "\n")
-
-    return len(seqs), len(kept)
+                seq_parts.append(line)
+        _flush()
+    return n
 
 
-# ── Rich display helpers ──────────────────────────────────────────────────────
+# ── Sequence utilities ────────────────────────────────────────────────────────
 
-def _fmt(val, unit: str = "") -> str:
-    """Format metric value; dim 'N/A' or missing entries."""
-    if val in ("N/A", "", None):
-        return "[dim]N/A[/dim]"
-    return f"{val}{unit}"
+def _fasta_stats(path: Path) -> dict:
+    """Compute basic assembly statistics from a FASTA file."""
+    lengths: list[int] = []
+    current = 0
+    with open(path) as f:
+        for line in f:
+            if line.startswith(">"):
+                if current > 0:
+                    lengths.append(current)
+                current = 0
+            else:
+                current += len(line.strip())
+        if current > 0:
+            lengths.append(current)
+    if not lengths:
+        return {"n": 0, "total_bp": 0, "largest_bp": 0, "n50_bp": 0}
+    return {
+        "n":         len(lengths),
+        "total_bp":  sum(lengths),
+        "largest_bp": max(lengths),
+        "n50_bp":    _n50(lengths),
+    }
 
 
-def _color_n50(val) -> str:
-    """Color N50 value by completeness expectation for purified phage."""
+def _n50(lengths: list[int]) -> int:
+    """N50: length of the contig at which ≥50% of total assembly is covered."""
+    sorted_l = sorted(lengths, reverse=True)
+    half     = sum(sorted_l) / 2
+    cumsum   = 0
+    for l in sorted_l:
+        cumsum += l
+        if cumsum >= half:
+            return l
+    return 0
+
+
+# ── Warnings ──────────────────────────────────────────────────────────────────
+
+def _check_assembly_warnings(stats: dict, active_warnings: list[str]) -> None:
     try:
-        v = int(val)
-        if v >= _N50_GOOD:     return f"[bold green]{v:,}bp[/bold green]"
-        if v >= _N50_WARN:     return f"[bold yellow]{v:,}bp[/bold yellow]"
-        return f"[bold red]{v:,}bp[/bold red]"
-    except (ValueError, TypeError):
-        return "[dim]N/A[/dim]"
-
-
-def _print_input_table(
-    sample_id: str, r1: Path, r2: Path, s1: Optional[Path]
-) -> None:
-    log_info(f"  R1 : {r1}  ({human_size(r1)})")
-    log_info(f"  R2 : {r2}  ({human_size(r2)})")
-    if s1 and Path(s1).exists():
-        log_info(f"  S1 : {s1}  ({human_size(Path(s1))})  [singletons]")
-
-
-def _print_summary_table(sample_id: str, stats: dict) -> None:
-    """Print assembly metrics as compact log lines."""
-    log_ok(
-        f"  SPAdes   : {_fmt(stats['sp_n'])} contigs | "
-        f"largest={_fmt(stats['sp_largest'], 'bp')} | "
-        f"N50={_color_n50(stats['sp_n50'])} | "
-        f"total={_fmt(stats['sp_total'], 'bp')}"
-    )
-    log_ok(
-        f"  MEGAHIT  : {_fmt(stats['mh_n'])} contigs | "
-        f"largest={_fmt(stats['mh_largest'], 'bp')} | "
-        f"N50={_color_n50(stats['mh_n50'])} | "
-        f"total={_fmt(stats['mh_total'], 'bp')}"
-    )
-    log_ok(
-        f"  NR final : {_fmt(stats['nr_n'])} contigs | "
-        f"largest={_fmt(stats['nr_largest'], 'bp')} | "
-        f"N50={_color_n50(stats['nr_n50'])} | "
-        f"−{stats['pct_redundant']} redundant"
-    )
-
-
-def _check_warnings(stats: dict) -> None:
-    """Emit contextual warnings based on assembly metrics."""
-    if stats["nr_n"] == 0:
-        log_warn(
-            "  No contigs assembled — check read quality and host removal step."
-        )
-        return
-
-    try:
-        n50 = int(stats["nr_n50"])
-        if n50 < _N50_CRITICAL:
-            log_warn(
-                f"  NR N50 = {n50:,}bp < {_N50_CRITICAL:,}bp — "
-                "severely fragmented assembly; Complete/HQ classification in "
-                "CheckV is unlikely. Check host removal and read quality."
-            )
+        n50 = int(stats.get("n50_bp", 0))
+        if n50 == 0:
+            msg = "N50 = 0 — no contigs produced."
+            log_warn(f"  {msg}"); active_warnings.append(msg)
         elif n50 < _N50_WARN:
-            log_warn(
-                f"  NR N50 = {n50:,}bp < {_N50_WARN:,}bp — "
-                "fragmented assembly; CheckV 'Complete' classification requires "
-                "contigs spanning the full genome with DTR/ITR termini. "
-                "Consider increasing coverage or checking for contamination."
-            )
-    except (TypeError, ValueError):
+            msg = (f"N50 = {n50:,} bp < {_N50_WARN:,} bp — "
+                   "fragmented assembly. Check host removal and coverage depth.")
+            log_warn(f"  {msg}"); active_warnings.append(msg)
+    except (ValueError, TypeError):
         pass
 
     try:
-        nr_n = int(stats["nr_n"])
-        if nr_n > _MAX_CONTIGS_CRIT:
-            log_warn(
-                f"  {nr_n} NR contigs — assembly failure or heavy contamination; "
-                "verify host-removal step and sample purity."
-            )
-        elif nr_n > _MAX_CONTIGS_WARN:
-            log_warn(
-                f"  {nr_n} NR contigs — unusually high for purified phage "
-                "(expected 1–{_MAX_CONTIGS_WARN}); "
-                "check for contamination or consider stricter host removal."
-            )
-    except (TypeError, ValueError):
+        largest = int(stats.get("largest_bp", 0))
+        if largest > _MAX_CONTIG_WARN:
+            msg = (f"Largest contig = {largest:,} bp > {_MAX_CONTIG_WARN:,} bp — "
+                   "unusually large for purified phage. "
+                   "Possible residual host contamination or concatenated assembly.")
+            log_warn(f"  {msg}"); active_warnings.append(msg)
+    except (ValueError, TypeError):
         pass
 
+
+# ── Completion panel ──────────────────────────────────────────────────────────
 
 def _print_completion_panel(
-    sample_id: str, nr_fa: Path, rpt_dir: Path, stats: dict
+    sample_id:  str,
+    contigs_out: Path,
+    rpt_dir:    Path,
+    stats:      dict,
+    spades_ok:  bool,
+    megahit_ok: bool,
+    singletons: bool,
+    active_warnings: list[str],
 ) -> None:
-    sp_n = stats.get("sp_n", "?")
-    mh_n = stats.get("mh_n", "?")
-    nr_n = stats.get("nr_n", "?")
-    pct  = stats.get("pct_redundant", "?")
-    n50  = stats.get("nr_n50", 0)
+    def _f(val) -> str:
+        v = str(val)
+        return "[dim]N/A[/dim]" if v in ("0", "", "None", "N/A") else f"{int(v):,}"
 
-    text = Text()
-    text.append("✓ ", style="bold green")
-    text.append(f"SPAdes={sp_n} + MEGAHIT={mh_n} contigs  →  ", style="dim white")
-    text.append(f"{nr_n}", style="bold green")
-    text.append(f" NR contigs  (−{pct} redundant)\n", style="cyan")
-    try:
-        n50_int = int(n50)
-        style = (
-            "bold green"  if n50_int >= _N50_GOOD else
-            "bold yellow" if n50_int >= _N50_WARN else
-            "bold red"
-        )
-        text.append(f"  NR N50 = ", style="dim white")
-        text.append(f"{n50_int:,} bp\n\n", style=style)
-    except (TypeError, ValueError):
-        text.append("\n")
-    text.append("NR contigs : ", style="dim white")
-    text.append(str(nr_fa) + "\n", style="white")
-    text.append("Summary    : ", style="dim white")
-    text.append(str(rpt_dir / "assembly_summary.tsv"), style="white")
+    def _green(val) -> str:
+        try:
+            v = int(val)
+            return (f"[bold green]{v:,}[/bold green]" if v > 0
+                    else f"[bold red]{v:,}[/bold red]")
+        except: return str(val)
+
+    spades_str  = "[green]✓[/green]" if spades_ok  else "[red]✗ failed[/red]"
+    megahit_str = "[green]✓[/green]" if megahit_ok else "[red]✗ failed[/red]"
+    s1_str      = "[green]✓[/green]" if singletons else "[dim]none[/dim]"
+
+    lines = [
+        "[bold]Assembly statistics[/bold]",
+        f"  [cyan]Final contigs  :[/cyan] {_green(stats.get('n_final', 0))} "
+        f"  [dim](raw={_f(stats.get('n_combined'))}  "
+        f"SPAdes={_f(stats.get('n_spades'))}  "
+        f"MEGAHIT={_f(stats.get('n_megahit'))})[/dim]",
+        f"  [cyan]N50            :[/cyan] {_f(stats.get('n50_bp'))} bp",
+        f"  [cyan]Largest contig :[/cyan] {_f(stats.get('largest_bp'))} bp",
+        f"  [cyan]Total assembly :[/cyan] {_f(stats.get('total_bp'))} bp",
+        "",
+        "[bold]Assemblers[/bold]",
+        f"  SPAdes   : {spades_str}  MEGAHIT : {megahit_str}  Singletons : {s1_str}",
+        "",
+        "[bold]Output[/bold]",
+        f"  NR contigs : {contigs_out}",
+        f"  Summary    : {rpt_dir / 'assembly_summary.tsv'}",
+    ]
+    if active_warnings:
+        lines += ["", "[bold yellow]Warnings[/bold yellow]"]
+        lines += [f"  [yellow]⚠ {w}[/yellow]" for w in active_warnings]
 
     console.print(Panel(
-        text,
+        "\n".join(lines),
         title=f"[bold cyan]Assembly complete — {sample_id}[/bold cyan]",
-        border_style="cyan",
-        padding=(0, 2),
-        width=90,
+        border_style="cyan", padding=(0, 2), width=90,
     ))
 
 
 # ── TSV summary ───────────────────────────────────────────────────────────────
 
-_TSV_HEADERS = ["sample", "assembler", "contigs", "largest_bp", "n50_bp", "total_bp"]
+_TSV_HEADERS = [
+    "sample", "spades_ok", "megahit_ok", "singletons_used",
+    "n_spades", "n_megahit", "n_combined", "n_final",
+    "total_bp", "largest_bp", "n50_bp", "kmers",
+]
 
 
-def _save_tsv(
-    sample_id: str,
-    sp_fa:     Optional[Path],
-    mh_fa:     Optional[Path],
-    nr_fa:     Optional[Path],
-    path:      Path,
-) -> None:
-    """Write / update the assembly summary TSV."""
-    def _s(fa):
-        if fa and fa.exists() and fa.stat().st_size > 0:
-            s = fasta_stats(fa)
-            return str(s["n"]), str(s["largest_bp"]), str(s["n50"]), str(s["total_bp"])
-        return "0", "0", "0", "0"
-
+def _save_tsv(row: dict, path: Path) -> None:
     rows: dict[str, dict] = {}
     if path.exists():
         with open(path) as f:
-            old_hdrs = f.readline().rstrip("\n").split("\t")
+            old_h = f.readline().rstrip("\n").split("\t")
             for line in f:
                 cols = line.rstrip("\n").split("\t")
-                if len(cols) >= 2:
-                    rows[f"{cols[0]}_{cols[1]}"] = dict(zip(old_hdrs, cols))
-
-    for asm, fa in [("spades", sp_fa), ("megahit", mh_fa), ("NR(cdhit)", nr_fa)]:
-        n, lg, n50, tot = _s(fa)
-        key = f"{sample_id}_{asm}"
-        rows[key] = dict(zip(_TSV_HEADERS, [sample_id, asm, n, lg, n50, tot]))
-
+                if cols and cols[0]: rows[cols[0]] = dict(zip(old_h, cols))
+    rows[row["sample"]] = {h: str(row.get(h, "")) for h in _TSV_HEADERS}
     with open(path, "w") as f:
         f.write("\t".join(_TSV_HEADERS) + "\n")
-        for row in rows.values():
-            f.write("\t".join(row.get(h, "") for h in _TSV_HEADERS) + "\n")
+        for r in rows.values():
+            f.write("\t".join(r.get(h, "") for h in _TSV_HEADERS) + "\n")
