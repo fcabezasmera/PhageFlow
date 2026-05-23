@@ -210,16 +210,14 @@ class Config:
         """Base directory for reports (logs, TSVs, MultiQC).
 
         Priority (highest to lowest):
-          1. --reports-dir CLI flag
-          2. _output_dir / reports  ← when -o is set, reports live beside results
-          3. dirs.reports in config.yaml
-          4. workdir/reports  (legacy default)
+          1. --reports-dir CLI flag  or  set_reports_dir()
+          2. dirs.reports in config.yaml
+          3. workdir/reports  (default)
+
+        When -o is used, the CLI explicitly sets both results and reports
+        under the project base directory, so no special logic is needed here.
         """
-        if self._reports_dir:
-            return self._reports_dir
-        if self._output_dir:
-            return self._output_dir / "reports"
-        return self.workdir / "reports"
+        return self._reports_dir or (self.workdir / "reports")
 
     def set_output_dir(self, path: Optional[Path]) -> None:
         if path is not None:

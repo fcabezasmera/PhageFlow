@@ -124,7 +124,7 @@ def run(
     require_tools(*TOOLS)
 
     out_dir = cfg.results(STEP)
-    rpt_dir = cfg.reports(STEP)
+    rpt_dir = cfg.reports(STEP) / sample_id   # per-sample: avoids mixing reports
     mkdirs(out_dir, rpt_dir)
 
     r1 = Path(r1)
@@ -183,7 +183,7 @@ def run(
 
         # 3/3 — MultiQC
         progress.update(task, description="[3/3] MultiQC — aggregating report")
-        _run_multiqc(rpt_dir)
+        _run_multiqc(rpt_dir, sample_id)
         progress.advance(task)
 
     metrics = _parse_fastp_json(json_f)
@@ -327,7 +327,13 @@ def _run_fastqc_parallel(r1: Path, r2: Path, rpt_dir: Path, log_f: Path) -> None
             fut.result()
 
 
-def _run_multiqc(rpt_dir: Path) -> None:
+def _run_multiqc(rpt_dir: Path, sample_id: str) -> None:
+    """Run MultiQC on only this sample's QC files.
+
+    rpt_dir is already per-sample (cfg.reports(STEP) / sample_id), so
+    MultiQC sees only this sample's fastp JSON and FastQC zips — no
+    cross-sample aggregation.
+    """
     mqc_dir = rpt_dir / "multiqc"
     mkdirs(mqc_dir)
     try:
@@ -335,7 +341,7 @@ def _run_multiqc(rpt_dir: Path) -> None:
             [
                 "multiqc", str(rpt_dir),
                 "--outdir",   str(mqc_dir),
-                "--title",    "PhageFlow QC",
+                "--title",    f"PhageFlow QC — {sample_id}",
                 "--filename", "multiqc_qc",
                 "--quiet",
             ],

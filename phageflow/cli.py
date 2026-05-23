@@ -35,6 +35,10 @@ def _load(
 ) -> object:
     """Load config.yaml and apply CLI overrides.
 
+    -o / --output-dir is the project base directory.
+    Results go to BASE/results/  and reports go to BASE/reports/.
+    --reports-dir overrides the reports path independently.
+
     Priority (highest → lowest):
         CLI flags  >  config.yaml values  >  auto-detected defaults
     """
@@ -47,9 +51,17 @@ def _load(
     cfg = load_config(cfg_path, workdir=wd)
 
     if output_dir:
-        cfg.set_output_dir(Path(output_dir))
+        # -o DIR → results in DIR/results/, reports in DIR/reports/
+        base = Path(output_dir)
+        cfg.set_output_dir(base / "results")
+        if not reports_dir:
+            # auto-set reports beside results unless explicitly overridden
+            cfg.set_reports_dir(base / "reports")
+
     if reports_dir:
+        # explicit --reports-dir always wins
         cfg.set_reports_dir(Path(reports_dir))
+
     if threads:
         cfg.threads = threads
 
