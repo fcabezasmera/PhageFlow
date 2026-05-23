@@ -36,6 +36,32 @@ assembly:
   kmers:      "21,33,55,77,99,127"
   min_length: 200
 
+host_removal:
+  # Accessions always merged with --host-file / --accessions.
+  # Add your lab propagation strains here so they are always removed.
+  # Genomes are downloaded once per sample to reports/02_host_removal/{sample}/host_genomes/
+  # Empty by default — do NOT hardcode organisms unless you know they are
+  # always present. Incorrect defaults remove phage reads silently.
+  always_include_accessions: []
+  # Example:
+  #   always_include_accessions:
+  #     - GCF_000005845.2   # E. coli K-12 MG1655
+
+  # Level A: post-extraction contamination check (bwa-mem2 mode).
+  # Subsamples 50,000 phage reads, classifies with Kraken2, warns if
+  # bacterial fraction exceeds this threshold. Diagnostic only — no reads removed.
+  # Only active when databases.kraken2 is configured.
+  contamination_warn_pct: 5.0
+
+  # Level B: adaptive bwa-mem2 post-filter (Kraken2 mode only, opt-in).
+  # When true: parse the Kraken2 report, download reference genomes for
+  # bacterial species > postfilter_min_pct%, and run a bwa-mem2 pass to
+  # capture residual contamination + DTR/ITR singletons.
+  # Adds 2-5 min (genome download + index) but recovers boundary reads.
+  # Roux et al. 2019 eLife; Nayfach et al. 2021 Nat Biotechnol.
+  kraken2_postfilter:  false
+  postfilter_min_pct:  1.0
+
 genomad:
   # 0.7 ≈ 97% precision. Camargo et al. 2023, Nat Biotechnol.
   min_score:            0.7

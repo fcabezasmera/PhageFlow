@@ -76,6 +76,44 @@ class AssemblyConfig:
 
 
 @dataclass
+class HostRemovalConfig:
+    """Configuration for Module 02 — host read removal.
+
+    always_include_accessions
+        NCBI accessions merged with any --host-file / --accessions the user
+        provides. Empty by default. Add lab-specific strains that are always
+        present in your preparations (e.g. the propagation host).
+        These are downloaded once per sample run and stored in
+        reports/02_host_removal/{sample_id}/host_genomes/.
+        Example:
+            always_include_accessions:
+              - GCF_000005845.2   # E. coli K-12 MG1655
+
+    kraken2_postfilter  [Level B, opt-in]
+        When True (Kraken2 mode only): after extracting phage reads with
+        Kraken2, parse the classification report and download reference genomes
+        for bacterial species exceeding postfilter_min_pct%. A second bwa-mem2
+        pass removes residual contamination and captures singletons at
+        DTR/ITR boundaries that Kraken2 discards (Nayfach et al. 2021).
+
+    postfilter_min_pct
+        Minimum percentage in the Kraken2 report to trigger per-species
+        genome download for Level B post-filter. Default 1.0%.
+
+    contamination_warn_pct  [Level A, always-on when Kraken2 DB available]
+        After bwa-mem2 extraction, a subsample of phage reads is classified
+        with Kraken2. If the bacterial fraction exceeds this threshold, a
+        warning is emitted and the contaminating taxa are listed.
+        Diagnostic only — no reads are removed.
+        Only runs if databases.kraken2 is configured.
+    """
+    always_include_accessions: list = field(default_factory=list)
+    kraken2_postfilter:         bool  = False
+    postfilter_min_pct:         float = 1.0
+    contamination_warn_pct:     float = 5.0
+
+
+@dataclass
 class GenomadConfig:
     # Classification score threshold. 0.7 ≈ 97% precision.
     # Camargo et al. 2023, Nat Biotechnol.
@@ -183,12 +221,13 @@ class Config:
     _output_dir:  Optional[Path] = field(default=None, repr=False, compare=False)
     _reports_dir: Optional[Path] = field(default=None, repr=False, compare=False)
 
-    databases: DatabaseConfig = field(default_factory=DatabaseConfig)
-    envs:      EnvConfig      = field(default_factory=EnvConfig)
-    assembly:  AssemblyConfig = field(default_factory=AssemblyConfig)
-    genomad:   GenomadConfig  = field(default_factory=GenomadConfig)
-    checkv:    CheckvConfig   = field(default_factory=CheckvConfig)
-    annotate:  AnnotateConfig = field(default_factory=AnnotateConfig)
+    databases:    DatabaseConfig    = field(default_factory=DatabaseConfig)
+    envs:         EnvConfig         = field(default_factory=EnvConfig)
+    assembly:     AssemblyConfig    = field(default_factory=AssemblyConfig)
+    host_removal: HostRemovalConfig = field(default_factory=HostRemovalConfig)
+    genomad:      GenomadConfig     = field(default_factory=GenomadConfig)
+    checkv:       CheckvConfig      = field(default_factory=CheckvConfig)
+    annotate:     AnnotateConfig    = field(default_factory=AnnotateConfig)
 
     # ------------------------------------------------------------------
     # Directory resolution
@@ -289,6 +328,16 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
         a = raw["assembly"]
         cfg.assembly.kmers      = a.get("kmers",      cfg.assembly.kmers)
         cfg.assembly.min_length = int(a.get("min_length", cfg.assembly.min_length))
+
+    # host_removal
+    if "host_removal" in raw:
+        hr = raw["host_removal"]
+        cfg.host_removal.always_include_accessions = list(
+            hr.get("always_include_accessions", [])
+        )
+        cfg.host_removal.kraken2_postfilter   = bool( hr.get("kraken2_postfilter",   cfg.host_removal.kraken2_postfilter))
+        cfg.host_removal.postfilter_min_pct   = float(hr.get("postfilter_min_pct",   cfg.host_removal.postfilter_min_pct))
+        cfg.host_removal.contamination_warn_pct = float(hr.get("contamination_warn_pct", cfg.host_removal.contamination_warn_pct))
 
     # genomad
     if "genomad" in raw:
