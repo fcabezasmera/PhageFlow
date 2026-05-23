@@ -209,12 +209,17 @@ class Config:
     def reports_dir(self) -> Path:
         """Base directory for reports (logs, TSVs, MultiQC).
 
-        Priority:
+        Priority (highest to lowest):
           1. --reports-dir CLI flag
-          2. dirs.reports in config.yaml
-          3. workdir/reports  (legacy default)
+          2. _output_dir / reports  ← when -o is set, reports live beside results
+          3. dirs.reports in config.yaml
+          4. workdir/reports  (legacy default)
         """
-        return self._reports_dir or (self.workdir / "reports")
+        if self._reports_dir:
+            return self._reports_dir
+        if self._output_dir:
+            return self._output_dir / "reports"
+        return self.workdir / "reports"
 
     def set_output_dir(self, path: Optional[Path]) -> None:
         if path is not None:

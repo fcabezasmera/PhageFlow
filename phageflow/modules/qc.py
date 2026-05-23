@@ -42,13 +42,16 @@ fastp parameters (literature-based for complete phage genome recovery):
     --low_complexity_filter --complexity_threshold 30
         Removes homopolymer / low-complexity reads (Roux et al. 2019, eLife).
 
-    --poly_x_filter --poly_x_min_len 10
+    --trim_poly_x / --poly_x_min_len 10
         Removes reads with poly-X tails ≥10 bp. Targets poly-G artefacts
         produced by NextSeq and NovaSeq 2-colour chemistry when signal is
         absent at the 3′ end. These reads pass --low_complexity_filter because
         the rest of the read is of acceptable quality, but the poly-G tail
         inflates k-mers in the De Bruijn graph and reduces assembly contiguity.
-        Chen et al. 2018, Genome Biology 19:274 (fastp poly_x_filter).
+        Note: in fastp 1.x the flag was renamed from --poly_x_filter to
+        --trim_poly_x (-x). Poly-G is already trimmed automatically for
+        NextSeq/NovaSeq by fastp 1.x; --trim_poly_x covers poly-A/C/T.
+        Chen et al. 2018, Genome Biology 19:274.
 
     --n_base_limit 5
         Remove reads with >5 N calls.
@@ -206,12 +209,13 @@ def _run_fastp(
 
     Key parameter decisions
     -----------------------
-    --poly_x_filter / --poly_x_min_len 10
+    --trim_poly_x / --poly_x_min_len 10
         NextSeq and NovaSeq use 2-colour chemistry. When signal is absent,
         the instrument calls G, producing poly-G artefacts at the 3′ end.
         --low_complexity_filter does not fully capture these because the
         remainder of the read may be high-quality. Filtering poly-X tails
         ≥10 bp removes these artefacts before assembly.
+        Flag renamed in fastp 1.x: --poly_x_filter → --trim_poly_x (-x).
         Reference: Chen et al. 2018, Genome Biology 19:274.
 
     --correction / --overlap_len_require 10
@@ -249,8 +253,12 @@ def _run_fastp(
         # Low-complexity filter (Roux et al. 2019)
         "--low_complexity_filter",
         "--complexity_threshold",       "30",
-        # Poly-X tail filter — targets NextSeq/NovaSeq poly-G artefacts
-        "--poly_x_filter",
+        # Poly-X tail filter — targets NextSeq/NovaSeq poly-G artefacts.
+        # Flag renamed in fastp 1.x: --poly_x_filter → --trim_poly_x (-x).
+        # Poly-G is already trimmed automatically for NextSeq/NovaSeq by default
+        # in fastp 1.x; --trim_poly_x adds coverage for poly-A/C/T tails.
+        # Chen et al. 2018, Genome Biology 19:274.
+        "--trim_poly_x",
         "--poly_x_min_len",             "10",
         # Output
         "--thread",       str(threads),
@@ -472,9 +480,13 @@ def _print_completion_panel(
     m:         dict,
     active_warnings: list[str],
 ) -> None:
-    """Standardised completion panel: key metrics · outputs · warnings."""
+    """Standardised completion panel: key metrics · outputs · warnings.
 
-    def _color(val_str: str, good: float, warn: float) -> str:
+    Uses markup strings (not Text objects) so Rich interprets colour tags.
+    """
+
+    def _c(val_str: str, good: float, warn: float) -> str:
+        """Return val_str wrapped in the appropriate Rich colour tag."""
         try:
             v = float(val_str.rstrip("%"))
             if v >= good: return f"[bold green]{val_str}[/bold green]"
@@ -483,34 +495,31 @@ def _print_completion_panel(
         except (ValueError, AttributeError):
             return str(val_str)
 
-    def _fmt(val: str) -> str:
+    def _f(val: str) -> str:
         return "[dim]N/A[/dim]" if val in ("N/A", "", None) else val
 
-    text = Text()
+    lines: list[str] = []
 
     # ── Key metrics ──
-    text.append("Key metrics\n", style="bold")
-    text.append(
-        f"  Reads   : {_fmt(m['reads_in'])} → {_fmt(m['reads_out'])}  "
-        f"pass={_color(m['pct_pass'], _PASS_GOOD, _PASS_WARN)}\n",
-        style="cyan",
+    lines.append("[bold]Key metrics[/bold]")
+    lines.append(
+        f"  [cyan]Reads   :[/cyan] {_f(m['reads_in'])} → {_f(m['reads_out'])}"
+        f"  pass={_c(m['pct_pass'], _PASS_GOOD, _PASS_WARN)}"
     )
-    text.append(
-        f"  Quality : Q20={_color(m['q20_pct'], _Q20_GOOD, _Q20_WARN)}  "
-        f"Q30={_color(m['q30_pct'], _Q30_GOOD, _Q30_WARN)}  "
-        f"GC={_fmt(m['gc_pct'])}  mean-len={_fmt(m['mean_len_out'])}\n",
-        style="cyan",
+    lines.append(
+        f"  [cyan]Quality :[/cyan]"
+        f" Q20={_c(m['q20_pct'], _Q20_GOOD, _Q20_WARN)}"
+        f"  Q30={_c(m['q30_pct'], _Q30_GOOD, _Q30_WARN)}"
+        f"  GC={_f(m['gc_pct'])}"
+        f"  mean-len={_f(m['mean_len_out'])}"
     )
-    text.append(
-        f"  Library : dup={_fmt(m['dup_rate'])}  "
-        f"insert={_fmt(m['insert_peak'])}  "
-        f"adapter={_fmt(m['adapter_pct'])}\n",
-        style="cyan",
+    lines.append(
+        f"  [cyan]Library :[/cyan]"
+        f" dup={_f(m['dup_rate'])}"
+        f"  insert={_f(m['insert_peak'])}"
+        f"  adapter={_f(m['adapter_pct'])}"
     )
-    text.append(
-        f"  PE corr : {_fmt(m['correction_rate'])}\n",
-        style="cyan",
-    )
+    lines.append(f"  [cyan]PE corr :[/cyan] {_f(m['correction_rate'])}")
 
     # Filtering breakdown (non-zero only)
     _FILT = {
@@ -526,25 +535,24 @@ def _print_completion_panel(
         if m.get(k, "0") not in ("0", "N/A", "", None)
     ]
     if parts:
-        text.append(f"  Filtered: {' · '.join(parts)}\n", style="dim white")
+        lines.append(f"  [dim]Filtered: {' · '.join(parts)}[/dim]")
 
     # ── Output files ──
-    text.append("\nOutput files\n", style="bold")
-    text.append(f"  Trimmed R1 : {r1_out}\n", style="white")
-    text.append(f"  Trimmed R2 : {r2_out}\n", style="white")
-    text.append(
-        f"  MultiQC    : {rpt_dir / 'multiqc' / 'multiqc_qc.html'}\n",
-        style="white",
-    )
+    lines.append("")
+    lines.append("[bold]Output files[/bold]")
+    lines.append(f"  Trimmed R1 : {r1_out}")
+    lines.append(f"  Trimmed R2 : {r2_out}")
+    lines.append(f"  MultiQC    : {rpt_dir / 'multiqc' / 'multiqc_qc.html'}")
 
     # ── Active warnings ──
     if active_warnings:
-        text.append("\nWarnings\n", style="bold yellow")
+        lines.append("")
+        lines.append("[bold yellow]Warnings[/bold yellow]")
         for w in active_warnings:
-            text.append(f"  ⚠ {w}\n", style="yellow")
+            lines.append(f"  [yellow]⚠ {w}[/yellow]")
 
     console.print(Panel(
-        text,
+        "\n".join(lines),
         title=f"[bold cyan]QC complete — {sample_id}[/bold cyan]",
         border_style="cyan",
         padding=(0, 2),
