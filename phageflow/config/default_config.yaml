@@ -26,6 +26,24 @@ envs:
 # ─────────────────────────────────────────────────────────────────────────────
 # Module 02 — Host read removal
 # ─────────────────────────────────────────────────────────────────────────────
+# Module 01 - Quality Control (fastp)
+# All values are read by phageflow/modules/qc.py
+qc:
+  average_qual: 22              # read-level mean quality floor
+  qualified_quality_phred: 25   # per-base quality threshold (99% accuracy)
+  unqualified_percent_limit: 10 # max % low-quality bases per read
+  length_required: 80           # minimum read length (bp) for PE150
+  cut_right_window_size: 4      # sliding-window size (bp)
+  cut_right_mean_quality: 25    # sliding-window quality floor
+  correction: true              # PE overlap correction
+  overlap_len_require: 15       # min overlap (bp) for PE correction
+  overlap_diff_percent_limit: 5 # max mismatch rate in overlap (%)
+  low_complexity_filter: true   # homopolymer filter (Roux 2019 MIUViG)
+  complexity_threshold: 20      # minimum complexity (%)
+  trim_poly_x: true             # poly-X tail removal (NextSeq/NovaSeq)
+  poly_x_min_len: 10            # min poly-X length to trigger trim (bp)
+  n_base_limit: 5               # max N calls per read
+
 host_removal:
   # NCBI accessions always merged with --host-file / --accessions.
   # Add lab propagation strains here so they are always removed.

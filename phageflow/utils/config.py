@@ -24,6 +24,26 @@ def _default_threads() -> int:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class QcConfig:
+    # fastp parameters — purified phage PE150
+    # Chen 2018; Wick & Holt 2022; Roux 2019 (MIUViG)
+    average_qual:               int  = 22
+    qualified_quality_phred:    int  = 25
+    unqualified_percent_limit:  int  = 10
+    length_required:            int  = 80
+    cut_right_window_size:      int  = 4
+    cut_right_mean_quality:     int  = 25
+    correction:                 bool = True
+    overlap_len_require:        int  = 15
+    overlap_diff_percent_limit: int  = 5
+    low_complexity_filter:      bool = True
+    complexity_threshold:       int  = 20
+    trim_poly_x:                bool = True
+    poly_x_min_len:             int  = 10
+    n_base_limit:               int  = 5
+
+
+@dataclass
 class AssemblyConfig:
     kmers:      str  = "21,33,55,77,99,127,141"
     min_length: int  = 200
@@ -107,6 +127,7 @@ class Config:
 
     databases:    DatabaseConfig    = field(default_factory=DatabaseConfig)
     envs:         EnvConfig         = field(default_factory=EnvConfig)
+    qc:           QcConfig          = field(default_factory=QcConfig)
     assembly:     AssemblyConfig    = field(default_factory=AssemblyConfig)
     host_removal: HostRemovalConfig = field(default_factory=HostRemovalConfig)
     genomad:      GenomadConfig     = field(default_factory=GenomadConfig)
@@ -202,6 +223,24 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
 
     if "envs" in raw:
         cfg.envs.main = raw["envs"].get("main", cfg.envs.main)
+
+    # qc
+    if "qc" in raw:
+        q = raw["qc"]
+        cfg.qc.average_qual               = int(  q.get("average_qual",               cfg.qc.average_qual))
+        cfg.qc.qualified_quality_phred    = int(  q.get("qualified_quality_phred",    cfg.qc.qualified_quality_phred))
+        cfg.qc.unqualified_percent_limit  = int(  q.get("unqualified_percent_limit",  cfg.qc.unqualified_percent_limit))
+        cfg.qc.length_required            = int(  q.get("length_required",            cfg.qc.length_required))
+        cfg.qc.cut_right_window_size      = int(  q.get("cut_right_window_size",      cfg.qc.cut_right_window_size))
+        cfg.qc.cut_right_mean_quality     = int(  q.get("cut_right_mean_quality",     cfg.qc.cut_right_mean_quality))
+        cfg.qc.correction                 = bool( q.get("correction",                 cfg.qc.correction))
+        cfg.qc.overlap_len_require        = int(  q.get("overlap_len_require",        cfg.qc.overlap_len_require))
+        cfg.qc.overlap_diff_percent_limit = int(  q.get("overlap_diff_percent_limit", cfg.qc.overlap_diff_percent_limit))
+        cfg.qc.low_complexity_filter      = bool( q.get("low_complexity_filter",      cfg.qc.low_complexity_filter))
+        cfg.qc.complexity_threshold       = int(  q.get("complexity_threshold",       cfg.qc.complexity_threshold))
+        cfg.qc.trim_poly_x                = bool( q.get("trim_poly_x",               cfg.qc.trim_poly_x))
+        cfg.qc.poly_x_min_len             = int(  q.get("poly_x_min_len",             cfg.qc.poly_x_min_len))
+        cfg.qc.n_base_limit               = int(  q.get("n_base_limit",               cfg.qc.n_base_limit))
 
     # assembly
     if "assembly" in raw:

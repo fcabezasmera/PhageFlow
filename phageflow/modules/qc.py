@@ -107,7 +107,7 @@ def run(
         task = progress.add_task("Initializing...", total=3)
 
         progress.update(task, description="[1/3] fastp   — Q25 · mean-Q22 · PE-correct(5%)")
-        _run_fastp(sample_id, r1, r2, r1_out, r2_out, json_f, html_f, log_f, cfg.threads)
+        _run_fastp(sample_id, r1, r2, r1_out, r2_out, json_f, html_f, log_f, cfg)
         progress.advance(task)
 
         progress.update(task, description="[2/3] FastQC  — per-read metrics (R1 + R2)")
@@ -133,42 +133,41 @@ def _run_fastp(
     r1: Path, r2: Path,
     r1_out: Path, r2_out: Path,
     json_f: Path, html_f: Path,
-    log_f:  Path, threads: int,
+    log_f:  Path, cfg,
 ) -> None:
     """Run fastp with phage-optimized parameters (see module docstring)."""
+    q = cfg.qc
     cmd = [
         "fastp",
         "--in1",  str(r1),     "--in2",  str(r2),
         "--out1", str(r1_out), "--out2", str(r2_out),
-        # Adapter trimming
         "--detect_adapter_for_pe",
-        # PE overlap correction (Chen et al. 2018)
-        "--correction",
-        "--overlap_len_require",        "15",
-        "--overlap_diff_percent_limit", "5",
-        # Sliding-window 3' quality trimming (Bolger et al. 2014)
         "--cut_right",
-        "--cut_right_window_size",      "4",
-        "--cut_right_mean_quality",     "25",
-        # Per-base + read-level quality (Wick & Holt 2022)
-        "--qualified_quality_phred",    "25",
-        "--unqualified_percent_limit",  "10",
-        "--average_qual",               "22",
-        "--n_base_limit",               "5",
-        # Length floor
-        "--length_required",            "80",
-        # Complexity filter (Roux et al. 2019 — MIUViG)
-        "--low_complexity_filter",
-        "--complexity_threshold",       "20",
-        # Poly-X tail trimming (NextSeq/NovaSeq G-tails)
-        "--trim_poly_x",
-        "--poly_x_min_len",             "10",
-        # Reporting
-        "--thread",       str(threads),
-        "--json",         str(json_f),
-        "--html",         str(html_f),
-        "--report_title", f"PhageFlow QC — {sample_id}",
+        "--cut_right_window_size",      str(q.cut_right_window_size),
+        "--cut_right_mean_quality",     str(q.cut_right_mean_quality),
+        "--qualified_quality_phred",    str(q.qualified_quality_phred),
+        "--unqualified_percent_limit",  str(q.unqualified_percent_limit),
+        "--average_qual",               str(q.average_qual),
+        "--n_base_limit",               str(q.n_base_limit),
+        "--length_required",            str(q.length_required),
+        "--thread",                     str(cfg.threads),
+        "--json",                       str(json_f),
+        "--html",                       str(html_f),
+        "--report_title",               f"PhageFlow QC — {sample_id}",
     ]
+    # Conditional flags — respect config booleans
+    if q.correction:
+        cmd += [
+            "--correction",
+            "--overlap_len_require",        str(q.overlap_len_require),
+            "--overlap_diff_percent_limit", str(q.overlap_diff_percent_limit),
+        ]
+    if q.low_complexity_filter:
+        cmd += ["--low_complexity_filter",
+                "--complexity_threshold",       str(q.complexity_threshold)]
+    if q.trim_poly_x:
+        cmd += ["--trim_poly_x",
+                "--poly_x_min_len",             str(q.poly_x_min_len)]
     run_silent(cmd, log_file=log_f)
     log_ok("  [fastp] complete")
 
