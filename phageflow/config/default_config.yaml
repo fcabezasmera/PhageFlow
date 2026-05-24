@@ -24,25 +24,6 @@ envs:
   main: phageflow
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Module 01 — Quality control (fastp)
-# ─────────────────────────────────────────────────────────────────────────────
-qc:
-  qualified_quality_phred: 20
-  unqualified_percent_limit: 10
-  average_qual: 20
-  length_required: 75
-  cut_right_window_size: 4
-  cut_right_mean_quality: 20
-  correction: true
-  overlap_len_require: 10
-  overlap_diff_percent_limit: 10
-  low_complexity_filter: true
-  complexity_threshold: 15
-  trim_poly_x: true
-  poly_x_min_len: 10
-  n_base_limit: 5
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Module 02 — Host read removal
 # ─────────────────────────────────────────────────────────────────────────────
 host_removal:
