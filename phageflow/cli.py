@@ -126,6 +126,11 @@ def _load(
     project:     Optional[str] = None,
 ) -> object:
     """Load config.yaml and apply CLI overrides."""
+    
+    if output_dir is None:
+        log_error("--output-dir is required. Provide -o /path/to/output")
+        sys.exit(1)
+        
     if project:
         p = Path(project)
         config  = str(p / "config" / "config.yaml")
@@ -186,7 +191,8 @@ def common_options(f):
     )(f)
     f = click.option(
         "-o", "--output-dir", "output_dir",
-        default=None, type=click.Path(),
+        required=True,
+        type=click.Path(),
         help="Base output directory.  results/ and reports/ are created inside it.",
     )(f)
     f = click.option(

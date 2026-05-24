@@ -133,10 +133,28 @@ class Config:
         if path is not None:
             self._reports_dir = Path(path)
 
-    def results(self, step: str) -> Path:
-        return self.results_dir / step
+    def results(self, step: str, sample_id: str = "") -> Path:
+        """Get results directory for a step and optionally a sample.
+        
+        Examples:
+            cfg.results("01_qc", "sample_001")  → results_dir/sample_001/01_qc/
+            cfg.results("01_qc")                 → results_dir/01_qc/  (backward compat)
+        """
+        base = self.results_dir
+        if sample_id:
+            return base / sample_id / step
+        return base / step
+
+    def logs(self, sample_id: str) -> Path:
+        """Get logs directory for a sample.
+        
+        Example:
+            cfg.logs("sample_001")  → results_dir/sample_001/logs/
+        """
+        return self.results_dir / sample_id / "logs"
 
     def reports(self, step: str) -> Path:
+        """Get reports directory for a step (deprecated in v0.2.0)."""
         return self.reports_dir / step
 
 
