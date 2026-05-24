@@ -18,7 +18,7 @@ databases:
   genomad:  databases/genomad_db
   phold:    databases/phold_db
   phynteny: databases/phynteny_db
-  kraken2:  databases/k2_db   # only needed for Kraken2 mode
+  kraken2:  databases/k2_db
 
 envs:
   main: phageflow

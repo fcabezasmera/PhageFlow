@@ -61,3 +61,5 @@ databases/
 .Rhistory
 databases/
 .Rhistory
+/config/
+*.local.yaml
