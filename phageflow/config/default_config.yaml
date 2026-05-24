@@ -10,10 +10,6 @@ memory_gb: 32
 
 # Output directories. Relative paths are resolved from workdir.
 # These can be overridden at runtime with -o / --reports-dir.
-# dirs:
-#   results: /absolute/path/to/results
-#   reports: /absolute/path/to/reports
-
 dirs:
   results: results
   reports: reports
@@ -29,17 +25,80 @@ databases:
 envs:
   main: phageflow
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Module 01 — Quality control (fastp)
+# ─────────────────────────────────────────────────────────────────────────────
+qc:
+  # Per-base quality threshold (Q20 = 99% accuracy).
+  # Chen et al. 2018, Genome Biology 19:274.
+  qualified_quality_phred: 20
+
+  # Max fraction of low-quality bases per read.
+  # 10% is stricter than fastp default (40%).
+  # Wick & Holt 2022, Microb Genomics 8:mgen000788.
+  unqualified_percent_limit: 10
+
+  # Read-level mean quality floor.
+  # Set to 20 (same as per-base floor) rather than 25.
+  # Rationale: Q25 discards reads from GC-poor terminal regions
+  # (common in Autographiviridae/T7-like) that are critical for
+  # DTR/ITR detection in CheckV. Wick & Holt 2022 benchmarks
+  # this on bacterial isolates, not high-coverage phage preps.
+  average_qual: 20
+
+  # Minimum read length after trimming.
+  # 75 bp minimum for PE150 downstream assembly.
+  # Bankevich et al. 2012, J Comput Biol 19:455.
+  length_required: 75
+
+  # Sliding-window 3' quality trimming.
+  # Bolger et al. 2014, Bioinformatics 30:2114.
+  cut_right_window_size: 4
+  cut_right_mean_quality: 20
+
+  # PE overlap-based error correction.
+  # Requires >=10 bp overlap with <=10% mismatch.
+  # Reduces base errors before De Bruijn graph construction.
+  # Chen et al. 2018.
+  correction: true
+  overlap_len_require: 10
+  overlap_diff_percent_limit: 10
+
+  # Low-complexity filter.
+  # IMPORTANT: threshold lowered from 30 to 15 for purified phage.
+  # Rationale: phage genomes contain genuinely repetitive elements
+  # (tail fibers, baseplate proteins, AT-rich promoter clusters, DTR
+  # sequences themselves). The original threshold of 30 was calibrated
+  # for metagenome datasets (Roux et al. 2019, eLife 8:e42923) where
+  # low-complexity reads are mostly sequencing artefacts. In purified
+  # phage preps, reads from repeat regions are real and their loss
+  # reduces terminal assembly quality, impairing CheckV DTR/ITR
+  # detection and Complete classification.
+  # Set to false to disable entirely if CompleteGenomes are still missed.
+  low_complexity_filter: true
+  complexity_threshold: 15
+
+  # Poly-X tail filter — targets NextSeq/NovaSeq poly-G artefacts.
+  # Chen et al. 2018.
+  trim_poly_x: true
+  poly_x_min_len: 10
+
+  # Max N calls per read.
+  n_base_limit: 5
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Module 02 — Host read removal
+# ─────────────────────────────────────────────────────────────────────────────
 assembly:
-  # k-mers for SPAdes and MEGAHIT (same value for reproducibility).
-  # k=141 is the MEGAHIT maximum; improves resolution in genomes >150 kb
-  # with long repetitive regions (Ackermannviridae, jumbo phages).
+  # k-mers shared between SPAdes and MEGAHIT for reproducibility.
+  # k=141 is the MEGAHIT maximum; improves resolution of repetitive regions
+  # in large genomes (Ackermannviridae, jumbo phages >150 kb).
   # Li et al. 2015, Bioinformatics 31:1674; Al-Shayeb et al. 2020, Nature 578:425.
   kmers:      "21,33,55,77,99,127,141"
   min_length: 200
 
-  # Iterative refinement (opt-in). Run AFTER quality.py via phageflow assembly-refine.
-  # Re-assembles using annotation_ready candidates as --trusted-contigs.
-  # Bankevich et al. 2012; Wan et al. 2023, mSystems 8:e01334.
+  # Iterative refinement (opt-in). Requires quality.py to have run first.
+  # See modules/assembly_refine.py — run AFTER quality.py.
   iterative_refinement: false
 
 host_removal:
@@ -68,6 +127,9 @@ host_removal:
   kraken2_postfilter:  false
   postfilter_min_pct:  1.0
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Module 04 — Viral identification (geNomad)
+# ─────────────────────────────────────────────────────────────────────────────
 genomad:
   # 0.7 ≈ 97% precision. Camargo et al. 2023, Nat Biotechnol.
   min_score:            0.7
@@ -96,6 +158,9 @@ genomad:
   # contain bacterial chromosomes. If proviruses appear, host removal failed.
   disable_find_proviruses: true
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Module 05 — Genome quality and selection (CheckV)
+# ─────────────────────────────────────────────────────────────────────────────
 checkv:
   # Nayfach et al. 2021, Nat Biotechnol 39:578.
   min_completeness:   50      # MQ ≥50% → annotation_ready/
@@ -112,12 +177,15 @@ checkv:
   max_kmer_freq:    1.5
   max_genome_copies: 1.5
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Module 06 — Annotation (Pharokka → Phold → Phynteny)
+# ─────────────────────────────────────────────────────────────────────────────
 annotate:
   # Phold
   phold_gpu:         true   # --foldseek_gpu; false → --cpu
   phold_finetune:    true   # phage-finetuned ProstT5 model (recommended)
   phold_batch_size:  1      # ESM batch size; increase on GPU (4–8)
-  phold_sensitivity: 9.5   # Foldseek sensitivity; 7.5 is ~2x faster
+  phold_sensitivity: 9.5    # Foldseek sensitivity; 7.5 is ~2x faster
   # Phynteny
   phynteny_confidence: 0.8  # tool source default (calibrated confidence)
   # Genetic code default: 11 (standard phage/bacterial).
