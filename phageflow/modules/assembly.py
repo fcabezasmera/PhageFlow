@@ -41,7 +41,7 @@ Directories
 
   results/03_assembly/
       {sample_id}_spades/          ← SPAdes workspace (trimmed post-run)
-          scaffolds.fasta          ← kept
+          contigs.fasta            ← kept (scaffolds.fasta NOT used — N-runs break CheckV DTR detection)
           assembly_graph.gfa       ← kept
           spades.log               ← kept
       {sample_id}_megahit/         ← MEGAHIT workspace
@@ -223,8 +223,8 @@ def _run_spades(
     --s1 singletons : unpaired reads (DTR/ITR boundary reads from bwa-mem2).
                       Nayfach et al. 2021, Nat Biotechnol 39:578.
     """
-    scaffolds = out_dir / "scaffolds.fasta"
-    if scaffolds.exists() and scaffolds.stat().st_size > 0 and not force:
+    contigs_fa = out_dir / "contigs.fasta"
+    if contigs_fa.exists() and contigs_fa.stat().st_size > 0 and not force:
         log_info("  [SPAdes] already assembled — skipping")
         return True
 
@@ -256,12 +256,12 @@ def _run_spades(
         log_warn(f"  [SPAdes] non-zero exit: {e}")
         return False
 
-    if not scaffolds.exists() or scaffolds.stat().st_size == 0:
-        log_warn("  [SPAdes] scaffolds.fasta missing or empty after run")
+    if not contigs_fa.exists() or contigs_fa.stat().st_size == 0:
+        log_warn("  [SPAdes] contigs.fasta missing or empty after run")
         return False
 
-    s = _fasta_stats(scaffolds)
-    log_ok(f"  [SPAdes] {s['n']:,} scaffolds  N50={s['n50_bp']:,} bp  "
+    s = _fasta_stats(contigs_fa)
+    log_ok(f"  [SPAdes] {s['n']:,} contigs  N50={s['n50_bp']:,} bp  "
            f"largest={s['largest_bp']:,} bp")
 
     # Cleanup large intermediate directories — keep useful output only.
@@ -272,11 +272,11 @@ def _run_spades(
 def _cleanup_spades(out_dir: Path) -> None:
     """Remove SPAdes intermediate files to reclaim disk space.
 
-    Keeps: scaffolds.fasta, assembly_graph.gfa, spades.log
+    Keeps: contigs.fasta, assembly_graph.gfa, spades.log
     Removes: corrected/ (BayesHammer reads), K21/ ... K127/ (k-mer graphs),
              misc/, pipeline_state/, tmp/
     """
-    keep = {"scaffolds.fasta", "assembly_graph.gfa", "assembly_graph.fastg",
+    keep = {"contigs.fasta", "assembly_graph.gfa", "assembly_graph.fastg",
             "spades.log", "contigs.fasta", "params.txt"}
     for child in list(out_dir.iterdir()):
         if child.name not in keep:
@@ -284,7 +284,7 @@ def _cleanup_spades(out_dir: Path) -> None:
                 shutil.rmtree(child, ignore_errors=True)
             else:
                 child.unlink(missing_ok=True)
-    log_info("  [SPAdes] intermediate files removed (scaffolds.fasta + graph retained)")
+    log_info("  [SPAdes] intermediate files removed (contigs.fasta + graph retained)")
 
 
 # ── MEGAHIT ───────────────────────────────────────────────────────────────────
@@ -407,7 +407,7 @@ def _combine_and_dereplicate(
     # Collect input FASTAs
     inputs: list[tuple[str, Path]] = []
     if spades_dir:
-        sp_fa = spades_dir / "scaffolds.fasta"
+        sp_fa = spades_dir / "contigs.fasta"
         if sp_fa.exists() and sp_fa.stat().st_size > 0:
             inputs.append(("SPAdes", sp_fa))
     if megahit_fa and megahit_fa.exists() and megahit_fa.stat().st_size > 0:

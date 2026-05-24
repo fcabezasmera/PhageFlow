@@ -1,659 +1,691 @@
-"""PhageFlow Module 04 — Viral identification with geNomad.
+"""PhageFlow Module 04 — Viral identification (geNomad).
 
-Tool:
-    geNomad v1.8+ (Camargo et al. 2023, Nature Biotechnology):
-        End-to-end classification of contigs as virus / plasmid / chromosome.
-        Detects integrated proviruses and assigns viral taxonomy.
+Goal: identify viral contigs from the assembly, classify their topology,
+determine genetic code, and output a filtered viral FASTA for quality.py.
 
-        --splits N         : Adaptive: min(8, n_contigs). Camargo et al. 2023.
-        --min-score        : configurable (default 0.7, ~97% precision).
-        --min-hallmarks    : configurable (default 0, score-only mode).
-        --cleanup          : removes annotate/ intermediates; keeps summary/
-                             including aggregated_classification.tsv (v1.8+).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tool: geNomad end-to-end
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Borderline large-contig rescue (purified_phage mode):
-    geNomad scores are calibrated on database sequences. Novel phage lineages
-    with no close database relatives consistently receive scores of 0.4-0.6
-    despite being genuine phage. For purified preparations, any contig
-    >= rescue_min_length_bp with score in [rescue_min_score, min_score) is
-    almost certainly phage and is added to the viral FASTA with a WARNING.
+geNomad combines k-mer marker gene search (MMseqs2) and a neural-network
+classifier (Camargo et al. 2023, Nat Biotechnol 41:1783).
 
-    Parameters (config.yaml):
-        genomad.rescue_min_score:     0.4  (floor — below this = discard)
-        genomad.rescue_min_length_bp: 10000 (bp)
+Key flags used:
 
-    Mechanism: reads {prefix}_aggregated_classification.tsv from the
-    summary/ directory (kept by --cleanup in geNomad v1.8+). If the file
-    is absent (older geNomad or manual deletion), rescue is skipped with
-    an informative message — not an error.
+  --enable-score-calibration --composition virome
+      Adjusts scores for virome-dominated samples (purified phage).
+      Reduces false negatives in novel lineages without close DB relatives.
 
-Output path convention:
-    geNomad names outputs using the STEM of the input FASTA (contigs.stem).
-    The resolved taxonomy TSV path is written to genomad_summary.tsv so
-    quality.py can locate it regardless of input filename.
+  --lenient-taxonomy
+      Resolves taxonomy below family rank (subfamily, genus, species).
+      Required for biologically meaningful co-binning in quality.py.
+      Without this, distinct genera within a family co-bin together.
 
-Input  : results/03_assembly/combined/{sample}_contigs_nr.fasta
-Output : results/04_viral_id/{sample}_virus.fna
-         reports/04_viral_id/genomad_summary.tsv
+  --disable-find-proviruses
+      Skips provirus detection. For purified phage preparations, bacterial
+      chromosomes should be absent. If proviruses appear, it indicates
+      host-removal failure rather than genuine lysogeny.
+
+  --sensitivity 4.2
+      MMseqs2 marker search sensitivity (default). Increase to 5.7–7.5 for
+      more distant relatives at proportional time cost.
+
+  --splits 0
+      Automatic MMseqs2 memory management (geNomad default).
+      NOT a parallelism flag. Increase only if MMseqs2 OOMs.
+
+  --cleanup
+      Remove large intermediate files (annotate/ subdir) after classification.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Filtering
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Main tier   : virus_score ≥ min_score (default 0.7, ~97% precision)
+  Rescue tier : min_score > score ≥ rescue_min_score (0.4)
+                AND length ≥ rescue_min_length_bp (10 kb)
+                Novel phages with no close DB relatives score 0.4–0.6
+                despite being genuine phages (Camargo et al. 2023).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Metadata propagation (critical for downstream modules)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  topology
+    Source: _virus_summary.tsv → column 'topology'
+    Values: DTR · ITR · No terminal repeats · Provirus · NA
+    Used by:
+      quality.py  → propagates to rename_map.tsv for downstream decisions
+      annotate.py → selects circular vs linear plot; gates dnaapler
+
+  genetic_code
+    Source: _virus_summary.tsv → column 'genetic_code'
+            Fallback: _virus_genes.tsv → mode per contig
+    Values: 11 (standard) · 15 (crAss-like: TGA=Trp)
+    Used by:
+      annotate.py → --genetic_code flag in Pharokka; ensures correct ORF
+                    prediction for CrAss-like phages (Crassvirales)
+                    Koonin et al. 2020, mBio 11:e00278-20
+
+  taxonomy (family + finest level)
+    Source: _virus_summary.tsv → column 'taxonomy'
+    Used by:
+      quality.py → co-binning at family level for candidate naming;
+                   finest level for biologically coherent grouping
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Output files
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  results/04_viral_id/
+      {sample_id}_virus.fna          ← viral contigs → quality.py --virus-fna
+      {sample_id}_metadata.tsv       ← topology + genetic_code + score per contig
+
+  reports/04_viral_id/{sample_id}/
+      genomad/                       ← geNomad output (TSVs after --cleanup)
+          {stem}/
+              {stem}_virus_summary.tsv
+              {stem}_virus_genes.tsv
+              {stem}_taxonomy.tsv
+      viral_id_summary.tsv
+      {sample_id}_viral_id.log
 """
 
 from __future__ import annotations
+import csv
 import shutil
-import subprocess
+from collections import Counter
 from pathlib import Path
+from typing import Optional
 
 from rich.panel import Panel
-from rich.text import Text
 from rich.progress import (
     Progress, SpinnerColumn, TextColumn,
     BarColumn, MofNCompleteColumn, TimeElapsedColumn,
 )
 
 from phageflow.utils.config import Config
-from phageflow.utils.logger import log_step, log_info, log_ok, log_warn, console
-from phageflow.utils.tools import (
-    require_tools, run_silent, mkdirs, fasta_stats, human_size,
+from phageflow.utils.logger import (
+    log_step, log_info, log_ok, log_warn, log_error, console,
 )
+from phageflow.utils.tools import require_tools, run_silent, mkdirs
 
 STEP  = "04_viral_id"
 TOOLS = ["genomad"]
 
-_VIRAL_FRACTION_WARN = 0.05
-_SCORE_GOOD          = 0.90
-_SCORE_WARN          = 0.70
-_SPLITS_MAX          = 8
-_COL_SCORE           = "virus_score"
-_COL_TAXONOMY        = "taxonomy"
 
-
-# -- Public entry point --------------------------------------------------------
+# ── Public entry point ────────────────────────────────────────────────────────
 
 def run(
     cfg:       Config,
     sample_id: str,
     contigs:   Path,
     force:     bool = False,
-) -> Path:
-    """
-    Identify viral contigs with geNomad + borderline large-contig rescue.
+) -> tuple[Path, Path]:
+    """Classify viral contigs with geNomad for a single sample.
+
+    Parameters
+    ----------
+    contigs : NR contigs FASTA from assembly step
 
     Returns
     -------
-    virus_fna : Path to viral contigs FASTA (input for CheckV / quality step)
+    (virus_fna, metadata_tsv)
+        virus_fna    : path to filtered viral FASTA
+        metadata_tsv : path to per-contig metadata (topology, genetic_code, score)
     """
-    require_tools(*TOOLS)
-
     contigs = Path(contigs)
-    out_dir = cfg.results(STEP)
-    rpt_dir = cfg.reports(STEP)
-    mkdirs(out_dir, rpt_dir)
+    out_dir  = cfg.results(STEP)
+    rpt_dir  = cfg.reports(STEP) / sample_id
+    genomad_dir = rpt_dir / "genomad"   # geNomad writes here
+    log_f    = rpt_dir / f"{sample_id}_viral_id.log"
+    mkdirs(out_dir, rpt_dir, genomad_dir)
 
-    if not cfg.databases.genomad.exists():
-        log_warn(f"  geNomad database not found: {cfg.databases.genomad}")
+    virus_fna    = out_dir / f"{sample_id}_virus.fna"
+    metadata_tsv = out_dir / f"{sample_id}_metadata.tsv"
 
-    virus_fna = out_dir / f"{sample_id}_virus.fna"
+    log_step(f"Module 04 — viral identification  [{sample_id}]")
+    log_info(f"  Contigs : {contigs}  ({_count_fasta(contigs):,} sequences)")
 
-    log_step(f"Module 04 -- viral-id [{sample_id}]")
+    if virus_fna.exists() and virus_fna.stat().st_size > 0 and not force:
+        log_info("  Already classified — skipping  (--force to re-run)")
+        return virus_fna, metadata_tsv
 
-    if not contigs.exists():
-        raise FileNotFoundError(f"[{sample_id}] contigs not found: {contigs}")
-    if contigs.stat().st_size == 0:
-        raise ValueError(f"[{sample_id}] contigs FASTA is empty: {contigs}")
+    db = cfg.databases.genomad
+    if not db or not Path(db).exists():
+        log_error(
+            "  geNomad database not found. "
+            "Set databases.genomad in config.yaml or run: "
+            "genomad download-database databases/"
+        )
+        raise FileNotFoundError(f"geNomad database not found: {db}")
 
-    s = fasta_stats(contigs)
-    if s["n"] == 0:
-        raise ValueError(f"[{sample_id}] no sequences in contigs FASTA: {contigs}")
-
-    _check_duplicate_headers(contigs, sample_id)
-
-    n_splits = min(_SPLITS_MAX, max(1, s["n"]))
-    prefix   = contigs.stem
-
-    _print_input_table(sample_id, contigs, s)
-    log_info(
-        f"  geNomad end-to-end  (Camargo et al. 2023)  |  "
-        f"min-score={cfg.genomad.min_score}  "
-        f"min-virus-hallmarks={cfg.genomad.min_hallmarks}  "
-        f"splits={n_splits}/{_SPLITS_MAX}"
-    )
-    log_info(
-        f"  Borderline rescue: score>={cfg.genomad.rescue_min_score} "
-        f"AND length>={cfg.genomad.rescue_min_length_bp:,}bp "
-        f"(purified_phage mode)"
-    )
-    log_info(f"  Output prefix: '{prefix}'")
-    log_info("  Classifying : virus / plasmid / chromosome + provirus")
-
-    sdir  = out_dir / sample_id
-    v_fna = sdir / f"{prefix}_summary" / f"{prefix}_virus.fna"
-    v_tsv = sdir / f"{prefix}_summary" / f"{prefix}_virus_summary.tsv"
+    require_tools(*TOOLS)
+    active_warnings: list[str] = []
 
     with Progress(
         SpinnerColumn(spinner_name="dots2"),
-        TextColumn("[bold cyan]{task.description:<52}"),
+        TextColumn("[bold cyan]{task.description:<60}"),
         BarColumn(bar_width=20, complete_style="cyan", finished_style="green"),
         MofNCompleteColumn(),
         TimeElapsedColumn(),
         console=console,
         transient=True,
     ) as progress:
-        task = progress.add_task("Initializing...", total=3)
+        task = progress.add_task("Initializing...", total=2)
 
-        # 1/3 -- geNomad
-        progress.update(task, description="[1/3] geNomad  -- end-to-end classification")
-        _run_genomad(cfg, sample_id, contigs, sdir, rpt_dir, prefix, n_splits, force)
+        # ── Step 1: geNomad classification ────────────────────────────────────
+        progress.update(task, description="[1/2] geNomad  — end-to-end classification")
+        _run_genomad(contigs, genomad_dir, Path(db), cfg, log_f, force)
         progress.advance(task)
 
-        # 2/3 -- Borderline large-contig rescue
-        progress.update(task, description="[2/3] geNomad  -- borderline rescue")
-        n_rescued = 0
-        if v_fna.exists() and v_fna.stat().st_size > 0:
-            n_rescued = _rescue_borderline_contigs(
-                cfg, contigs, sdir, prefix, v_fna, rpt_dir,
-            )
-        progress.advance(task)
-
-        # 3/3 -- Parse + copy
-        progress.update(task, description="[3/3] geNomad  -- parsing & copying results")
-        row = _parse_genomad_output(
-            cfg, sample_id, s["n"], sdir, prefix, v_fna, v_tsv, n_rescued,
+        # ── Step 2: Parse + filter + write outputs ────────────────────────────
+        progress.update(task, description="[2/2] Parsing results — topology · genetic code · taxonomy")
+        stats = _process_results(
+            contigs, genomad_dir, virus_fna, metadata_tsv,
+            cfg, sample_id, active_warnings,
         )
-        if v_fna.exists() and v_fna.stat().st_size > 0:
-            try:
-                shutil.copy(v_fna, virus_fna)
-            except OSError as e:
-                log_warn(f"  [geNomad] copy failed: {e} -- using {v_fna}")
-                virus_fna = v_fna
-            log_ok("  [geNomad] results parsed")
-        else:
-            _diagnose_genomad_failure(cfg, sdir, prefix, rpt_dir, sample_id, s["n"])
         progress.advance(task)
 
-    _validate_output(sample_id, virus_fna, row)
-    _save_tsv(row, rpt_dir / "genomad_summary.tsv")
-    _print_summary_table(sample_id, row)
-    _check_warnings(row)
-    _print_completion_panel(sample_id, virus_fna, rpt_dir, row)
-
-    log_step(f"Module 04 completed v  [{sample_id}]")
-    log_ok(f"  Virus FASTA : {virus_fna}")
-    log_info(
-        f"  Next: phageflow quality --sample-id {sample_id} "
-        f"--virus-fna {virus_fna}"
-    )
-    return virus_fna
+    _save_tsv({**stats, "sample": sample_id}, rpt_dir / "viral_id_summary.tsv")
+    _print_completion_panel(sample_id, virus_fna, metadata_tsv,
+                            rpt_dir, stats, active_warnings)
+    log_step(f"Module 04 completed ✓  [{sample_id}]")
+    return virus_fna, metadata_tsv
 
 
-# -- Input validation ----------------------------------------------------------
-
-def _check_duplicate_headers(contigs: Path, sample_id: str) -> None:
-    seen: set[str] = set()
-    duplicates: list[str] = []
-    with open(contigs) as f:
-        for line in f:
-            if line.startswith(">"):
-                hdr = line[1:].split()[0].strip()
-                if hdr in seen:
-                    duplicates.append(hdr)
-                else:
-                    seen.add(hdr)
-    if duplicates:
-        log_warn(
-            f"  [validate] {len(duplicates)} duplicate FASTA header(s) in "
-            f"{contigs.name} -- geNomad may fail. "
-            f"First: '{duplicates[0]}'. Re-run Module 03 with --force."
-        )
-
-
-# -- Step 1: geNomad -----------------------------------------------------------
+# ── geNomad runner ────────────────────────────────────────────────────────────
 
 def _run_genomad(
-    cfg:       Config,
-    sample_id: str,
-    contigs:   Path,
-    sdir:      Path,
-    rpt_dir:   Path,
-    prefix:    str,
-    n_splits:  int,
-    force:     bool,
+    contigs:     Path,
+    genomad_dir: Path,
+    db:          Path,
+    cfg:         Config,
+    log_f:       Path,
+    force:       bool,
 ) -> None:
-    v_fna = sdir / f"{prefix}_summary" / f"{prefix}_virus.fna"
-    if v_fna.exists() and v_fna.stat().st_size > 0 and not force:
-        log_info("  [geNomad] already processed -- skipping  (--force to re-run)")
+    """Run geNomad end-to-end on contigs.
+
+    geNomad creates a subdirectory named after the input file stem inside
+    genomad_dir. The virus_summary.tsv and virus_genes.tsv produced there
+    are the primary outputs.
+    """
+    stem = contigs.stem
+    expected_summary = genomad_dir / stem / f"{stem}_virus_summary.tsv"
+
+    if expected_summary.exists() and not force:
+        log_info("  [geNomad] output already exists — skipping")
         return
-    mkdirs(sdir)
-    run_silent([
+
+    cmd = [
         "genomad", "end-to-end",
-        "--cleanup",
-        "--splits",              str(n_splits),
-        "--min-score",           str(cfg.genomad.min_score),
+        str(contigs),
+        str(genomad_dir),
+        str(db),
+        "--threads", str(cfg.threads),
+        "--quiet",
+        "--cleanup",                   # remove large annotate/ intermediate dir
+        "--sensitivity", str(cfg.genomad.sensitivity),
+        "--min-score", str(cfg.genomad.min_score),
         "--min-virus-hallmarks", str(cfg.genomad.min_hallmarks),
-        "--threads",             str(cfg.threads),
-        str(contigs), str(sdir), str(cfg.databases.genomad),
-    ], log_file=rpt_dir / f"{sample_id}_genomad.log", check=False)
-
-    if v_fna.exists() and v_fna.stat().st_size > 0:
-        log_ok("  [geNomad] classification complete")
-
-
-# -- Step 2: Borderline large-contig rescue ------------------------------------
-
-def _find_aggregated_tsv(sdir: Path, prefix: str) -> Path | None:
-    """
-    Locate aggregated_classification.tsv (all sequences with scores).
-
-    geNomad v1.8+ places this in {prefix}_summary/ which is kept by --cleanup.
-    Older versions may place it directly in sdir.
-    """
-    candidates = [
-        sdir / f"{prefix}_summary" / f"{prefix}_aggregated_classification.tsv",
-        sdir / f"{prefix}_aggregated_classification.tsv",
     ]
-    found = next((p for p in candidates if p.exists()), None)
-    if found is None:
-        hits = list(sdir.rglob("*aggregated_classification.tsv"))
-        found = hits[0] if hits else None
-    return found
+
+    if cfg.genomad.enable_score_calibration:
+        cmd += ["--enable-score-calibration",
+                "--composition", cfg.genomad.composition]
+    if cfg.genomad.lenient_taxonomy:
+        cmd.append("--lenient-taxonomy")
+    if cfg.genomad.disable_find_proviruses:
+        cmd.append("--disable-find-proviruses")
+    if cfg.genomad.splits > 0:
+        cmd += ["--splits", str(cfg.genomad.splits)]
+
+    log_info(
+        f"  [geNomad] calibration={cfg.genomad.enable_score_calibration} "
+        f"composition={cfg.genomad.composition} "
+        f"lenient-tax={cfg.genomad.lenient_taxonomy} "
+        f"sensitivity={cfg.genomad.sensitivity}"
+    )
+    run_silent(cmd, log_file=log_f)
+    log_ok("  [geNomad] classification complete")
 
 
-def _load_fasta_local(path: Path) -> dict[str, str]:
-    """Load FASTA sequences keyed by first-word header ID."""
-    seqs: dict[str, str] = {}
-    hdr = seq = ""
-    with open(path) as f:
-        for line in f:
-            line = line.rstrip()
-            if line.startswith(">"):
-                if hdr:
-                    seqs[hdr] = seq
-                hdr = line[1:].split()[0]
-                seq = ""
-            else:
-                seq += line
-    if hdr:
-        seqs[hdr] = seq
-    return seqs
+# ── Output processing ─────────────────────────────────────────────────────────
 
-
-def _rescue_borderline_contigs(
-    cfg:       Config,
-    contigs:   Path,
-    sdir:      Path,
-    prefix:    str,
-    virus_fna: Path,
-    rpt_dir:   Path,
-) -> int:
-    """
-    Append large borderline-scored contigs to the viral FASTA.
-
-    Contigs with score in [rescue_min_score, min_score) AND length >=
-    rescue_min_length_bp are added with explicit WARNING. In purified phage
-    preparations these are almost certainly novel phage lineages with no
-    close database relatives, which systematically receive lower geNomad
-    scores (Camargo et al. 2023).
-
-    Source: {prefix}_aggregated_classification.tsv (all contigs with scores,
-    kept by --cleanup in geNomad v1.8+). If absent, rescue is skipped.
-
-    Returns number of rescued contigs.
-    """
-    rescue_min_score = cfg.genomad.rescue_min_score
-    rescue_min_len   = cfg.genomad.rescue_min_length_bp
-    min_score        = cfg.genomad.min_score
-
-    agg_tsv = _find_aggregated_tsv(sdir, prefix)
-    if not agg_tsv:
-        log_info(
-            "  [borderline rescue] aggregated_classification.tsv not found -- "
-            "rescue skipped. geNomad v1.8+ keeps this in "
-            f"{prefix}_summary/. Re-run with --force if needed."
-        )
-        return 0
-
-    # IDs already included in virus FASTA (passed min_score threshold)
-    existing_viral: set[str] = set(_load_fasta_local(virus_fna).keys())
-
-    # All sequences from the input contigs FASTA (for retrieving sequences)
-    all_seqs = _load_fasta_local(contigs)
-
-    candidates: list[tuple[str, int, float]] = []
-    try:
-        with open(agg_tsv) as f:
-            header = f.readline().strip().split("\t")
-            col    = {h: i for i, h in enumerate(header)}
-
-            id_idx  = col.get("seq_name", 0)
-            len_idx = col.get("length", 1)
-            sc_idx  = col.get(_COL_SCORE, -1)
-
-            if sc_idx == -1:
-                log_warn(
-                    f"  [borderline rescue] column '{_COL_SCORE}' not found in "
-                    f"{agg_tsv.name} -- rescue skipped."
-                )
-                return 0
-
-            for line in f:
-                parts = line.strip().split("\t")
-                if not parts or len(parts) <= max(id_idx, len_idx, sc_idx):
-                    continue
-                seq_id = parts[id_idx].split("|")[0].strip()
-                try:
-                    length = int(parts[len_idx])
-                    score  = float(parts[sc_idx])
-                except (ValueError, IndexError):
-                    continue
-
-                if (
-                    seq_id not in existing_viral
-                    and rescue_min_score <= score < min_score
-                    and length >= rescue_min_len
-                ):
-                    candidates.append((seq_id, length, score))
-
-    except Exception as e:
-        log_warn(f"  [borderline rescue] could not parse {agg_tsv.name}: {e}")
-        return 0
-
-    if not candidates:
-        log_info(
-            f"  [borderline rescue] 0 candidates found "
-            f"(score [{rescue_min_score}, {min_score}), "
-            f"length >={rescue_min_len:,}bp)"
-        )
-        return 0
-
-    n_added = 0
-    with open(virus_fna, "a") as f_out:
-        for seq_id, length, score in candidates:
-            seq = all_seqs.get(seq_id, "")
-            if not seq:
-                log_warn(
-                    f"  [borderline rescue] {seq_id}: sequence not found in "
-                    f"{contigs.name} -- skipping"
-                )
-                continue
-            log_warn(
-                f"  [borderline rescue] {seq_id}: {length:,}bp  "
-                f"score={score:.3f} (< min_score {min_score}, "
-                f">= rescue_min_score {rescue_min_score}) "
-                f"-- added to viral FASTA (purified_phage, novel lineage)"
-            )
-            f_out.write(f">{seq_id}\n{seq}\n")
-            n_added += 1
-
-    if n_added:
-        log_ok(
-            f"  [borderline rescue] {n_added} contig(s) added -- "
-            "verify in downstream CheckV + geNomad taxonomy output"
-        )
-    return n_added
-
-
-# -- Failure diagnosis ---------------------------------------------------------
-
-def _diagnose_genomad_failure(
-    cfg:       Config,
-    sdir:      Path,
-    prefix:    str,
-    rpt_dir:   Path,
-    sample_id: str,
-    n_contigs: int,
-) -> None:
-    summary_dir = sdir / f"{prefix}_summary"
-    log_path    = rpt_dir / f"{sample_id}_genomad.log"
-    if summary_dir.exists() and any(summary_dir.iterdir()):
-        log_warn(
-            f"  [geNomad] 0 viral contigs from {n_contigs} input contigs "
-            f"(min-score={cfg.genomad.min_score}). "
-            f"Options: lower genomad.min_score in config.yaml or set "
-            f"min_virus_hallmarks: 0."
-        )
-    else:
-        log_warn(
-            f"  [geNomad] execution failed -- no summary at {summary_dir}. "
-            f"Check: {log_path}"
-        )
-
-
-# -- Validation ----------------------------------------------------------------
-
-def _validate_output(sample_id: str, virus_fna: Path, row: dict) -> None:
-    if not virus_fna.exists() or virus_fna.stat().st_size == 0:
-        log_warn(f"  validate . virus FASTA missing or empty: {virus_fna}")
-        return
-    n = row.get("viral_ctg", 0)
-    if n == 0:
-        log_warn(
-            "  validate . 0 viral contigs -- lower genomad.min_score "
-            "or check assembly output."
-        )
-    else:
-        log_ok(f"  validate . {n} viral contig(s) identified -- OK")
-
-
-# -- Parsers -------------------------------------------------------------------
-
-def _parse_genomad_output(
-    cfg:        Config,
-    sample_id:  str,
-    n_input:    int,
-    sdir:       Path,
-    prefix:     str,
-    v_fna:      Path,
-    v_tsv:      Path,
-    n_rescued:  int,
+def _process_results(
+    contigs:      Path,
+    genomad_dir:  Path,
+    virus_fna:    Path,
+    metadata_tsv: Path,
+    cfg:          Config,
+    sample_id:    str,
+    active_warnings: list[str],
 ) -> dict:
-    v_stats  = fasta_stats(v_fna) if v_fna.exists() else {"n": 0, "total_bp": 0}
-    n_viral  = v_stats["n"]
-    viral_bp = v_stats["total_bp"]
+    """Parse geNomad outputs, filter, extract FASTAs, write metadata TSV."""
 
-    p_tsv  = sdir / f"{prefix}_summary" / f"{prefix}_plasmid_summary.tsv"
-    n_plas = _count_tsv_rows(p_tsv)
+    # Locate geNomad output files
+    virus_summary_f, virus_genes_f = _find_genomad_outputs(genomad_dir)
 
-    pr_tsv = sdir / f"{prefix}_find_proviruses" / f"{prefix}_provirus.tsv"
-    if pr_tsv.exists():
-        n_prov = _count_tsv_rows(pr_tsv)
-    else:
-        n_prov = 0
-        if (sdir / f"{prefix}_summary").exists():
-            log_info(
-                "  [geNomad] find_proviruses/ not found (--cleanup or "
-                "no proviruses) -- provirus count set to 0."
-            )
+    # Parse virus_summary.tsv — scores, topology, taxonomy, genetic_code
+    viral_hits = _parse_virus_summary(
+        virus_summary_f,
+        cfg.genomad.min_score,
+        cfg.genomad.rescue_min_score,
+        cfg.genomad.rescue_min_length_bp,
+    )
 
-    best_taxon, best_score = _parse_best_hit(v_tsv)
+    if not viral_hits:
+        msg = "No viral contigs identified by geNomad."
+        log_warn(f"  {msg}")
+        active_warnings.append(msg)
+        virus_fna.write_text("")
+        metadata_tsv.write_text("")
+        return {"n_total": "0", "n_main": "0", "n_rescued": "0",
+                "n_viral": "0", "top_family": "N/A", "has_crasslike": "False"}
+
+    # Fallback: get genetic_code from _virus_genes.tsv for any contigs
+    # where virus_summary didn't report it (geNomad <1.8 may omit the column)
+    codes_from_genes = _parse_genetic_codes_from_genes(
+        virus_genes_f, set(viral_hits.keys())
+    )
+    for seq, info in viral_hits.items():
+        if info.get("genetic_code", 0) == 0 and seq in codes_from_genes:
+            info["genetic_code"] = codes_from_genes[seq]
+
+    # Count tiers
+    n_main    = sum(1 for v in viral_hits.values() if v["status"] == "main")
+    n_rescued = sum(1 for v in viral_hits.values() if v["status"] == "rescued")
+    n_total   = _count_fasta(contigs)
+
+    log_ok(
+        f"  [filter] {len(viral_hits):,} viral contigs "
+        f"({n_main} main ≥{cfg.genomad.min_score}  "
+        f"{n_rescued} rescued)"
+    )
+
+    if n_rescued:
+        log_info(
+            f"  [rescue] {n_rescued} borderline contigs retained "
+            f"(score {cfg.genomad.rescue_min_score}–{cfg.genomad.min_score}, "
+            f"length ≥{cfg.genomad.rescue_min_length_bp:,} bp)"
+        )
+
+    # Extract viral FASTAs from contigs
+    n_written = _extract_viral_fastas(contigs, set(viral_hits.keys()), virus_fna)
+    log_ok(f"  [extract] {n_written:,} sequences written to {virus_fna.name}")
+
+    # Taxonomy summary
+    families  = _collect_families(viral_hits)
+    top_family = families[0][0] if families else "Unknown"
+    has_crasslike = any(
+        int(v.get("genetic_code", 11)) == 15 for v in viral_hits.values()
+    )
+    if has_crasslike:
+        log_info(
+            "  [taxonomy] CrAss-like phage detected (genetic_code=15, TGA=Trp) "
+            "— Pharokka will use --genetic_code 15"
+        )
+
+    # Propagate topology summary to log
+    topologies = Counter(v["topology"] for v in viral_hits.values())
+    topo_str = "  ".join(f"{t}={n}" for t, n in topologies.most_common())
+    log_info(f"  [topology] {topo_str}")
+
+    # Write metadata TSV (critical link to quality.py and annotate.py)
+    _write_metadata(viral_hits, metadata_tsv)
+    log_ok(f"  [metadata] written → {metadata_tsv.name}")
+
+    naming_levels   = _collect_naming_levels(viral_hits)
+    top_naming      = naming_levels[0][0] if naming_levels else "Phage"
+    n_known_family  = sum(1 for v in viral_hits.values() if v["family"] != "Unknown")
 
     return {
-        "sample":              sample_id,
-        "input_ctg":           n_input,
-        "viral_ctg":           n_viral,
-        "viral_bp":            viral_bp,
-        "plasmid":             n_plas,
-        "provirus":            n_prov,
-        "best_taxon":          best_taxon,
-        "best_score":          round(best_score, 4),
-        "rescued_borderline":  n_rescued,
-        "genomad_tax_tsv":     str(v_tsv),
+        "n_input_contigs": str(n_total),
+        "n_viral":         str(len(viral_hits)),
+        "n_main":          str(n_main),
+        "n_rescued":       str(n_rescued),
+        "top_family":      top_family,
+        "top_naming_level": top_naming,
+        "n_known_family":  str(n_known_family),
+        "has_crasslike":   str(has_crasslike),
+        "topologies":      topo_str,
     }
 
 
-def _parse_best_hit(v_tsv: Path) -> tuple[str, float]:
-    if not v_tsv.exists():
-        return "unclassified", 0.0
-    best_taxon = "unclassified"
-    best_score = 0.0
-    try:
-        with open(v_tsv) as f:
-            raw_header = f.readline().strip()
-            if not raw_header:
-                return best_taxon, best_score
-            header = raw_header.split("\t")
-            col    = {h: i for i, h in enumerate(header)}
-            for required in (_COL_SCORE, _COL_TAXONOMY):
-                if required not in col:
-                    log_warn(
-                        f"  [geNomad] column '{required}' missing in "
-                        f"{v_tsv.name} -- version mismatch?"
-                    )
-                    return best_taxon, best_score
-            score_idx = col[_COL_SCORE]
-            tax_idx   = col[_COL_TAXONOMY]
-            for line in f:
-                row = line.strip().split("\t")
-                if not row or len(row) <= max(score_idx, tax_idx):
-                    continue
-                try:
-                    score = float(row[score_idx])
-                except (ValueError, IndexError):
-                    continue
-                if score > best_score:
-                    best_score = score
-                    levels = [
-                        lvl.strip()
-                        for lvl in row[tax_idx].split(";")
-                        if lvl.strip()
-                        and lvl.strip().lower() != "unclassified"
-                    ]
-                    best_taxon = levels[-1] if levels else "unclassified"
-    except Exception as e:
-        log_warn(f"  [geNomad] could not parse {v_tsv.name}: {e}")
-    return best_taxon, best_score
+# ── geNomad output discovery ──────────────────────────────────────────────────
+
+def _find_genomad_outputs(genomad_dir: Path) -> tuple[Path, Path]:
+    """Locate virus_summary and virus_genes TSVs inside geNomad output dir.
+
+    geNomad creates a subdirectory named after the input file stem.
+    We use glob to avoid hardcoding the stem.
+    """
+    summaries = sorted(genomad_dir.rglob("*_virus_summary.tsv"))
+    if not summaries:
+        raise FileNotFoundError(
+            f"geNomad virus_summary.tsv not found in {genomad_dir}. "
+            "Check geNomad log for errors."
+        )
+    virus_summary_f = summaries[0]
+    genomad_out     = virus_summary_f.parent
+    stem            = virus_summary_f.stem.replace("_virus_summary", "")
+    virus_genes_f   = genomad_out / f"{stem}_virus_genes.tsv"
+    return virus_summary_f, virus_genes_f
 
 
-def _count_tsv_rows(path: Path) -> int:
+# ── Parsing ───────────────────────────────────────────────────────────────────
+
+def _parse_virus_summary(
+    path:                Path,
+    min_score:           float,
+    rescue_min_score:    float,
+    rescue_min_length_bp: int,
+) -> dict:
+    """Parse geNomad virus_summary.tsv.
+
+    Returns {seq_name: {score, topology, genetic_code, n_hallmarks,
+                        taxonomy, family, finest, status, length}}
+
+    Filtering logic
+    ---------------
+    main     : score ≥ min_score (0.7 by default, ~97% precision)
+    rescued  : rescue_min_score ≤ score < min_score AND length ≥ rescue_min_length_bp
+               Novel lineages without close DB relatives score 0.4–0.6.
+               Rescue prevents losing genuine phages not in geNomad DB.
+               Reference: Camargo et al. 2023, Nat Biotechnol 41:1783.
+    discarded: everything else
+    """
     if not path.exists():
+        raise FileNotFoundError(f"virus_summary.tsv not found: {path}")
+
+    hits: dict = {}
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            seq_name = row.get("seq_name", "").strip()
+            if not seq_name:
+                continue
+
+            try:
+                score  = float(row.get("virus_score", 0) or 0)
+                length = int(row.get("length", 0) or 0)
+            except (ValueError, TypeError):
+                continue
+
+            # Determine tier
+            if score >= min_score:
+                status = "main"
+            elif score >= rescue_min_score and length >= rescue_min_length_bp:
+                status = "rescued"
+            else:
+                continue   # below threshold — discard
+
+            topology     = (row.get("topology")     or "NA").strip()
+            n_hallmarks  = int(row.get("n_hallmarks", 0) or 0)
+            taxonomy_str = (row.get("taxonomy")     or "").strip()
+            tax          = _parse_taxonomy(taxonomy_str)
+
+            # genetic_code: may be in virus_summary (geNomad ≥1.8) or absent
+            try:
+                gc = int(row.get("genetic_code", 11) or 11)
+            except (ValueError, TypeError):
+                gc = 11
+
+            hits[seq_name] = {
+                "score":        score,
+                "length":       length,
+                "topology":     topology,
+                "n_hallmarks":  n_hallmarks,
+                "genetic_code": gc,
+                "taxonomy":     taxonomy_str,
+                "family":       tax["family"],
+                "finest":       tax["finest"],
+                "naming_level": tax["naming_level"],
+                "status":       status,
+            }
+    return hits
+
+
+def _parse_genetic_codes_from_genes(path: Path, viral_seqs: set) -> dict:
+    """Parse _virus_genes.tsv for genetic_code per contig (mode across genes).
+
+    Fallback for geNomad versions that don't report genetic_code in
+    virus_summary.tsv. All genes of a given contig use the same genetic
+    code in geNomad, so the mode = the true value.
+    """
+    if not path.exists():
+        return {}
+    codes: dict[str, list] = {}
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            seq = row.get("seq_name", "").strip()
+            # virus_genes.tsv has format "seq_name|start|stop" for the gene ID;
+            # the contig name is the first part
+            contig = seq.split("|")[0] if "|" in seq else seq
+            if contig not in viral_seqs:
+                continue
+            try:
+                gc = int(row.get("genetic_code", 11) or 11)
+            except (ValueError, TypeError):
+                gc = 11
+            codes.setdefault(contig, []).append(gc)
+    return {
+        contig: Counter(vals).most_common(1)[0][0]
+        for contig, vals in codes.items()
+    }
+
+
+def _parse_taxonomy(taxonomy_str: str) -> dict:
+    """Extract family and finest level from geNomad semicolon-separated lineage.
+
+    geNomad taxonomy format (with --lenient-taxonomy):
+        Viruses;Duplodnaviria;Heunggongvirae;Uroviricota;Caudoviricetes;
+        Caudovirales;Drexlerviridae;Lambdavirus
+
+    ICTV rank suffixes (used to avoid mis-classifying higher ranks as family):
+        Realm   : -viria        e.g. Duplodnaviria
+        Kingdom : -virae        e.g. Heunggongvirae
+        Phylum  : -viricota     e.g. Uroviricota
+        Class   : -viricetes    e.g. Caudoviricetes
+        Order   : -virales      e.g. Caudovirales
+        Family  : -viridae      e.g. Drexlerviridae  ← only this level
+        Genus   : -virus        e.g. Lambdavirus
+
+    Family: ONLY levels ending in 'viridae' (not -viria, -viricota, etc.)
+            → 'Unknown' when classification does not reach family rank
+
+    Finest: last non-empty level (genus/species with --lenient-taxonomy)
+            → used as naming_level fallback in quality.py when family is Unknown
+
+    naming_level: family if known, else finest non-Viruses level, else 'Phage'
+                  → candidate names: Drexlerviridae_candidate_001
+                                     Caudovirales_candidate_001   (order-level)
+                                     Phage_candidate_001          (unclassified)
+    """
+    if not taxonomy_str:
+        return {"family": "Unknown", "finest": "Unknown", "naming_level": "Phage"}
+
+    levels = [l.strip() for l in taxonomy_str.split(";") if l.strip()]
+
+    # Family: strictly -viridae suffix (ICTV standard)
+    family = "Unknown"
+    for level in reversed(levels):
+        if level.endswith("viridae"):
+            family = level
+            break
+
+    finest = levels[-1] if levels else "Unknown"
+
+    # naming_level: best available rank for candidate naming
+    # Priority: family > finest (if not a root/realm) > 'Phage'
+    if family != "Unknown":
+        naming_level = family
+    elif finest not in ("Unknown", "Viruses", ""):
+        naming_level = finest
+    else:
+        naming_level = "Phage"
+
+    return {"family": family, "finest": finest, "naming_level": naming_level}
+
+
+# ── FASTA extraction ──────────────────────────────────────────────────────────
+
+def _extract_viral_fastas(
+    contigs: Path, viral_seqs: set, output: Path
+) -> int:
+    """Extract viral contigs from assembly FASTA by sequence ID.
+
+    geNomad's seq_name matches the first whitespace-delimited token of the
+    FASTA header (i.e. the sequence ID, not the full description line).
+    """
+    n = 0
+    write = False
+    with open(contigs) as f_in, open(output, "w") as f_out:
+        for line in f_in:
+            if line.startswith(">"):
+                header_id = line[1:].split()[0].strip()
+                write = header_id in viral_seqs
+                if write:
+                    n += 1
+            if write:
+                f_out.write(line)
+    return n
+
+
+# ── Metadata TSV ──────────────────────────────────────────────────────────────
+
+_META_HEADERS = [
+    "seq_name", "length", "virus_score", "n_hallmarks",
+    "topology", "genetic_code", "family", "finest", "naming_level", "taxonomy", "status",
+]
+
+
+def _write_metadata(hits: dict, path: Path) -> None:
+    """Write per-contig metadata TSV.
+
+    This file is the critical data link between viral_id → quality → annotate:
+      topology     → rename_map.tsv topology column
+      genetic_code → Pharokka --genetic_code
+      family       → candidate naming ({Family}_candidate_N)
+      finest       → co-binning granularity (--lenient-taxonomy)
+    """
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_META_HEADERS, delimiter="\t",
+                                extrasaction="ignore")
+        writer.writeheader()
+        for seq, info in sorted(hits.items(), key=lambda x: -x[1]["score"]):
+            writer.writerow({
+                "seq_name":    seq,
+                "length":      info["length"],
+                "virus_score": f"{info['score']:.4f}",
+                "n_hallmarks": info["n_hallmarks"],
+                "topology":    info["topology"],
+                "genetic_code": info["genetic_code"],
+                "family":      info["family"],
+                "finest":      info["finest"],
+                "naming_level": info.get("naming_level", info["family"] if info["family"] != "Unknown" else "Phage"),
+                "taxonomy":    info["taxonomy"],
+                "status":      info["status"],
+            })
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _count_fasta(path: Path) -> int:
+    """Count sequences in a FASTA file."""
+    if not path.exists() or path.stat().st_size == 0:
         return 0
-    try:
-        with open(path) as f:
-            lines = [l for l in f if l.strip() and not l.startswith("#")]
-        return max(0, len(lines) - 1)
-    except Exception:
-        return 0
+    n = 0
+    with open(path) as f:
+        for line in f:
+            if line.startswith(">"):
+                n += 1
+    return n
 
 
-# -- Rich display helpers -------------------------------------------------------
-
-def _color_score(score: float) -> str:
-    s = f"{score:.3f}"
-    if score >= _SCORE_GOOD: return f"[bold green]{s}[/bold green]"
-    if score >= _SCORE_WARN: return f"[bold yellow]{s}[/bold yellow]"
-    return f"[bold red]{s}[/bold red]"
+def _collect_families(hits: dict) -> list[tuple[str, int]]:
+    """Return sorted list of (family, count) by frequency."""
+    return Counter(v["family"] for v in hits.values()).most_common()
 
 
-def _color_rate(val_str: str, good: float, warn: float) -> str:
-    try:
-        v = float(str(val_str).rstrip("%"))
-        if v >= good: return f"[bold green]{val_str}[/bold green]"
-        if v >= warn: return f"[bold yellow]{val_str}[/bold yellow]"
-        return f"[bold red]{val_str}[/bold red]"
-    except (ValueError, AttributeError):
-        return str(val_str)
+def _collect_naming_levels(hits: dict) -> list[tuple[str, int]]:
+    """Return sorted list of (naming_level, count) by frequency.
+
+    naming_level is the best available rank for candidate naming:
+    family if known, finest otherwise, 'Phage' if unclassified.
+    """
+    return Counter(v.get("naming_level", "Phage") for v in hits.values()).most_common()
 
 
-def _fmt(val, unit: str = "") -> str:
-    if val in ("N/A", "", None):
-        return "[dim]N/A[/dim]"
-    return f"{val}{unit}"
-
-
-def _print_input_table(sample_id: str, contigs: Path, stats: dict) -> None:
-    log_info(f"  Contigs : {contigs}  ({human_size(contigs)})")
-    log_info(
-        f"  Input   : {stats['n']} sequence(s) | "
-        f"total={stats['total_bp']:,}bp | largest={stats['largest_bp']:,}bp"
-    )
-
-
-def _print_summary_table(sample_id: str, row: dict) -> None:
-    n_in      = row.get("input_ctg",         0)
-    n_vir     = row.get("viral_ctg",         0)
-    n_bp      = row.get("viral_bp",          0)
-    n_pls     = row.get("plasmid",           0)
-    n_prv     = row.get("provirus",          0)
-    n_resc    = row.get("rescued_borderline",0)
-    taxon     = row.get("best_taxon",        "unclassified")
-    score     = row.get("best_score",        0.0)
-
-    pct_vir     = f"{n_vir / n_in * 100:.1f}%" if n_in else "N/A"
-    colored_pct = _color_rate(pct_vir, 50.0, 5.0) if n_in else "[dim]N/A[/dim]"
-
-    log_ok(
-        f"  Contigs  : {n_in} input -> {n_vir} viral "
-        f"({colored_pct})  |  {n_bp:,}bp total viral"
-    )
-    if n_resc:
-        log_ok(f"  Rescued  : {n_resc} borderline large contig(s) added")
-    log_ok(f"  Other    : plasmid={_fmt(n_pls)}  provirus={_fmt(n_prv)}")
-    log_ok(f"  Best hit : {taxon}  |  score={_color_score(score)}")
-
-
-def _check_warnings(row: dict) -> None:
-    n_in  = row.get("input_ctg", 0)
-    n_vir = row.get("viral_ctg", 0)
-    if n_vir == 0:
-        log_warn(
-            "  No viral contigs -- lower genomad.min_score in config.yaml."
-        )
-        return
-    if n_in and (n_vir / n_in) < _VIRAL_FRACTION_WARN:
-        log_warn(
-            f"  Only {n_vir}/{n_in} contigs viral ({n_vir / n_in * 100:.1f}%) "
-            "-- verify host removal or check for contamination."
-        )
-    if row.get("provirus", 0) > 0:
-        log_warn(
-            f"  {row['provirus']} provirus(es) detected -- "
-            "review lifecycle prediction (Module 08)."
-        )
-    if 0 < row.get("best_score", 0.0) < _SCORE_WARN:
-        log_warn(
-            f"  Best score {row['best_score']:.3f} < {_SCORE_WARN} -- "
-            "borderline; consider manual inspection."
-        )
-
+# ── Completion panel ──────────────────────────────────────────────────────────
 
 def _print_completion_panel(
-    sample_id: str, virus_fna: Path, rpt_dir: Path, row: dict
+    sample_id:    str,
+    virus_fna:    Path,
+    metadata_tsv: Path,
+    rpt_dir:      Path,
+    stats:        dict,
+    active_warnings: list[str],
 ) -> None:
-    n_in  = row.get("input_ctg",  "?")
-    n_vir = row.get("viral_ctg",  "?")
-    taxon = row.get("best_taxon", "unclassified")
-    score = row.get("best_score", 0.0)
-    n_pls = row.get("plasmid",    0)
-    n_prv = row.get("provirus",   0)
-    n_rsc = row.get("rescued_borderline", 0)
+    def _f(val) -> str:
+        return "[dim]N/A[/dim]" if str(val) in ("", "None", "N/A") else str(val)
 
-    text = Text()
-    text.append("v ", style="bold green")
-    text.append(f"{n_in} contigs  ->  ", style="dim white")
-    text.append(f"{n_vir}", style="bold green")
-    text.append(
-        f" viral  (plasmid={n_pls}  provirus={n_prv}"
-        + (f"  rescued={n_rsc}" if n_rsc else "") + ")\n",
-        style="cyan",
-    )
-    text.append(f"  best hit : {taxon}  (score={score:.3f})\n\n", style="dim white")
-    text.append("Virus FASTA : ", style="dim white")
-    text.append(str(virus_fna) + "\n", style="white")
-    text.append("Summary     : ", style="dim white")
-    text.append(str(rpt_dir / "genomad_summary.tsv"), style="white")
+    n_input  = _f(stats.get("n_input_contigs", "N/A"))
+    n_viral  = stats.get("n_viral",   "0")
+    n_main   = stats.get("n_main",    "0")
+    n_resc   = stats.get("n_rescued", "0")
+    family   = _f(stats.get("top_family", "N/A"))
+    topos    = _f(stats.get("topologies", "N/A"))
+    crasslike = stats.get("has_crasslike", "False") == "True"
+
+    try:
+        pct = f"{int(n_viral) / int(n_input) * 100:.1f}%"
+    except (ValueError, ZeroDivisionError):
+        pct = "N/A"
+
+    # Collect naming_level info for display
+    top_naming = _f(stats.get("top_naming_level", family))
+    family_known = stats.get("n_known_family", "0") != "0"
+
+    lines = [
+        "[bold]Viral contigs[/bold]",
+        f"  [cyan]Input contigs  :[/cyan] {n_input}",
+        f"  [cyan]Viral retained :[/cyan] [bold green]{n_viral}[/bold green] "
+        f"({pct})  [dim]main={n_main}  rescued={n_resc}[/dim]",
+        f"  [cyan]Top family     :[/cyan] {family}"
+        + ("" if family_known else "  [dim](family unresolved — using finest level for naming)[/dim]"),
+        f"  [cyan]Naming level   :[/cyan] {top_naming}",
+        f"  [cyan]Topology       :[/cyan] {topos}",
+    ]
+    if crasslike:
+        lines.append(
+            "  [yellow]⚡ CrAss-like detected[/yellow]  "
+            "[dim]genetic_code=15 → Pharokka --genetic_code 15[/dim]"
+        )
+    lines += [
+        "",
+        "[bold]Output files[/bold]",
+        f"  Viral FASTA : {virus_fna}",
+        f"  Metadata    : {metadata_tsv}",
+        f"  Summary     : {rpt_dir / 'viral_id_summary.tsv'}",
+    ]
+    if active_warnings:
+        lines += ["", "[bold yellow]Warnings[/bold yellow]"]
+        lines += [f"  [yellow]⚠ {w}[/yellow]" for w in active_warnings]
 
     console.print(Panel(
-        text,
-        title=f"[bold cyan]Viral-id complete -- {sample_id}[/bold cyan]",
-        border_style="cyan",
-        padding=(0, 2),
-        width=90,
+        "\n".join(lines),
+        title=f"[bold cyan]Viral ID complete — {sample_id}[/bold cyan]",
+        border_style="cyan", padding=(0, 2), width=90,
     ))
 
 
-# -- TSV summary ---------------------------------------------------------------
+# ── TSV summary ───────────────────────────────────────────────────────────────
 
 _TSV_HEADERS = [
-    "sample", "input_ctg", "viral_ctg", "viral_bp",
-    "plasmid", "provirus", "best_taxon", "best_score",
-    "rescued_borderline", "genomad_tax_tsv",
+    "sample", "n_input_contigs", "n_viral", "n_main", "n_rescued",
+    "top_family", "top_naming_level", "n_known_family", "has_crasslike", "topologies",
 ]
 
 
@@ -661,11 +693,11 @@ def _save_tsv(row: dict, path: Path) -> None:
     rows: dict[str, dict] = {}
     if path.exists():
         with open(path) as f:
-            old_hdrs = f.readline().rstrip("\n").split("\t")
+            old_h = f.readline().rstrip("\n").split("\t")
             for line in f:
                 cols = line.rstrip("\n").split("\t")
                 if cols and cols[0]:
-                    rows[cols[0]] = dict(zip(old_hdrs, cols))
+                    rows[cols[0]] = dict(zip(old_h, cols))
     rows[row["sample"]] = {h: str(row.get(h, "")) for h in _TSV_HEADERS}
     with open(path, "w") as f:
         f.write("\t".join(_TSV_HEADERS) + "\n")
