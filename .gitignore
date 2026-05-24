@@ -1,33 +1,63 @@
-# Runtime outputs
-results/
-reports/
-output/
-
-# Databases (too large)
-databases/
-
-# Conda environments
-envs/
-
-# Sample data (machine-specific paths and large files)
-config/samples.tsv
-test/
-data/
-
-# Python build artifacts
-phageflow.egg-info/
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
 
-# Snakemake
-.snakemake/
-*.snakemake.log
+# ── Pipeline runtime outputs ──────────────────────────────────────────────────
+# Use `phageflow init /your/project/` to keep outputs separate from code.
+results/
+reports/
 
-# Logs and temp
-*.log
-*.tmp
+# ── Tool / model caches ───────────────────────────────────────────────────────
+# HuggingFace cache (phold, ESM2, ProstT5) — belongs in ~/.cache, not in repo
+cache/
+.cache/
+.transformers_cache/
 
-# Local files
+# ── Raw sequencing data ───────────────────────────────────────────────────────
+# Never version raw reads — use a data registry or DVC instead
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.bam.bai
+*.sam
+
+# ── Assembly intermediates ────────────────────────────────────────────────────
+*.fasta.bwt.2bit.64
+*.fasta.0123
+*.fasta.amb
+*.fasta.ann
+*.fasta.pac
+*.fasta.fai
+
+# ── Conda / virtual environments ─────────────────────────────────────────────
+envs/
+.venv/
+env/
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Misc outputs that should not live in the code directory ──────────────────
+output/
+tmp/
+databases/
 .Rhistory
-cleanup.sh
+databases/
+.Rhistory
