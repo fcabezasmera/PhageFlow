@@ -3,10 +3,11 @@
 from __future__ import annotations
 import math
 import multiprocessing
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import click
 
@@ -18,8 +19,98 @@ from phageflow.utils.logger import (
 
 CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 
-# Computed once at import time so the help text shows the real default.
 _AUTO_THREADS = _default_threads()
+
+# ---------------------------------------------------------------------------
+# Sample-ID inference
+# ---------------------------------------------------------------------------
+
+# Suffixes stripped from R1 filenames to produce a clean sample ID.
+# Applied in order; first match wins.
+_R1_PATTERNS = [
+    r"[._\-]R1_001$",   # Illumina NextSeq:  sample_R1_001.fastq.gz
+    r"[._\-]R1$",       # Standard:          sample_R1.fastq.gz
+    r"[._\-]1_001$",    # Alternative:       sample_1_001.fastq.gz
+    r"[._\-]1$",        # Short form:        sample_1.fastq.gz
+    r"_read1$",         # Verbose:           sample_read1.fastq.gz
+]
+
+# FASTQ extensions to strip before applying R1 patterns.
+_FASTQ_EXTS = (".fastq.gz", ".fq.gz", ".fastq", ".fq")
+
+
+def _infer_sample_id(r1: str | Path) -> str:
+    """Derive a sample ID from the R1 filename.
+
+    Examples
+    --------
+    sampleA_R1_001.fastq.gz  →  sampleA
+    sampleA_R1.fastq.gz      →  sampleA
+    sampleA_1.fastq.gz       →  sampleA
+    sampleA_1.fq.gz          →  sampleA
+
+    Falls back to the full filename stem (minus extension) if no pattern
+    matches — never crashes.
+    """
+    name = Path(r1).name.lower()
+    stem = Path(r1).name
+
+    # Strip FASTQ extension (case-insensitive)
+    for ext in _FASTQ_EXTS:
+        if name.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+
+    # Strip R1 suffix
+    for pattern in _R1_PATTERNS:
+        new = re.sub(pattern, "", stem, flags=re.IGNORECASE)
+        if new != stem:
+            return new.strip("._-") or stem
+
+    # No pattern matched — return stem as-is
+    return stem
+
+
+def _find_read_pairs(raw_dir: Path) -> list[tuple[Path, Path]]:
+    """Scan *raw_dir* for paired FASTQ files.
+
+    Matching strategy (in priority order):
+      1. Files containing ``_R1`` / ``_R2`` (Illumina standard)
+      2. Files ending in ``_1`` / ``_2`` (alternative convention)
+
+    Returns a sorted list of ``(r1, r2)`` tuples.  Warns about R1 files
+    without a matching R2 but never crashes.
+    """
+    pairs: list[tuple[Path, Path]] = []
+
+    # Collect all FASTQ files
+    fastqs = sorted(
+        f for f in raw_dir.iterdir()
+        if f.is_file() and any(
+            f.name.lower().endswith(ext) for ext in _FASTQ_EXTS
+        )
+    )
+
+    # Identify R1 files by pattern
+    r1_files = [
+        f for f in fastqs
+        if re.search(r"[._\-]R1[._\-]|[._\-]R1\.", f.name, re.IGNORECASE)
+        or re.search(r"[._\-]1[._\-]|[._\-]1\.", f.name, re.IGNORECASE)
+    ]
+
+    for r1 in r1_files:
+        # Build the corresponding R2 name
+        r2_name = re.sub(r"R1", "R2", r1.name, flags=re.IGNORECASE)
+        if r2_name == r1.name:
+            # No R1→R2 substitution worked; try _1→_2
+            r2_name = re.sub(r"([._\-])1([._\-])", r"\g<1>2\2", r1.name)
+        r2 = raw_dir / r2_name
+        if r2.exists():
+            pairs.append((r1, r2))
+        else:
+            log_warn(f"  R1 found but no matching R2: {r1.name}")
+
+    return pairs
 
 
 # ---------------------------------------------------------------------------
@@ -34,15 +125,7 @@ def _load(
     threads:     Optional[int] = None,
     project:     Optional[str] = None,
 ) -> object:
-    """Load config.yaml and apply CLI overrides.
-
-    -o / --output-dir is the project base directory.
-    Results go to BASE/results/  and reports go to BASE/reports/.
-    --reports-dir overrides the reports path independently.
-
-    Priority (highest → lowest):
-        CLI flags  >  config.yaml values  >  auto-detected defaults
-    """
+    """Load config.yaml and apply CLI overrides."""
     if project:
         p = Path(project)
         config  = str(p / "config" / "config.yaml")
@@ -56,15 +139,12 @@ def _load(
     cfg = load_config(cfg_path, workdir=wd)
 
     if output_dir:
-        # -o DIR → results in DIR/results/, reports in DIR/reports/
         base = Path(output_dir)
         cfg.set_output_dir(base / "results")
         if not reports_dir:
-            # auto-set reports beside results unless explicitly overridden
             cfg.set_reports_dir(base / "reports")
 
     if reports_dir:
-        # explicit --reports-dir always wins
         cfg.set_reports_dir(Path(reports_dir))
 
     if threads:
@@ -93,56 +173,49 @@ def common_options(f):
     """Options shared by every pipeline command."""
     f = click.option(
         "--project", default=None, type=click.Path(),
-        help="Project directory (from phageflow init). Overrides --config and --workdir.")(f)
+        help="Project directory (from phageflow init). Overrides --config and --workdir.",
+    )(f)
     f = click.option(
         "-c", "--config",
         default="config/config.yaml", show_default=True,
         help="Path to config.yaml.",
     )(f)
     f = click.option(
-        "-w", "--workdir",
-        default=None,
+        "-w", "--workdir", default=None,
         help="Pipeline working directory (must contain config/ and databases/).",
     )(f)
     f = click.option(
         "-o", "--output-dir", "output_dir",
         default=None, type=click.Path(),
-        help=(
-            "Base output directory for results/  "
-            "[default: workdir/results]. "
-            "Overrides dirs.results in config.yaml."
-        ),
+        help="Base output directory.  results/ and reports/ are created inside it.",
     )(f)
     f = click.option(
-        "--reports-dir",
-        default=None, type=click.Path(),
-        help=(
-            "Base output directory for reports/  "
-            "[default: workdir/reports]. "
-            "Overrides dirs.reports in config.yaml."
-        ),
+        "--reports-dir", default=None, type=click.Path(),
+        help="Override the reports directory independently of -o.",
     )(f)
     f = click.option(
-        "-t", "--threads",
-        default=None, type=int,
+        "-t", "--threads", default=None, type=int,
         help=(
             f"CPU threads  [default: auto {_AUTO_THREADS} = 90% of "
-            f"{multiprocessing.cpu_count()} logical CPUs]. "
-            "Overrides config.yaml and auto-detection."
+            f"{multiprocessing.cpu_count()} logical CPUs]."
         ),
     )(f)
     f = click.option(
         "--force", is_flag=True, default=False,
-        help="Force re-run even if output already exists.",
+        help="Force re-run even if outputs already exist.",
     )(f)
     return f
 
 
 def reads_options(f):
-    """Options for modules that accept paired-end reads."""
+    """R1 / R2 / optional sample-id for modules that process paired reads."""
     f = click.option(
-        "--sample-id", required=True,
-        help="Sample identifier (used for all output filenames).",
+        "--sample-id", default=None,
+        help=(
+            "Sample identifier used for all output filenames.  "
+            "Inferred from --r1 filename when omitted "
+            "(e.g. sampleA_R1.fastq.gz → sampleA)."
+        ),
     )(f)
     f = click.option(
         "--r1", "r1_path", required=True, type=click.Path(exists=True),
@@ -153,6 +226,15 @@ def reads_options(f):
         help="R2 reads (FASTQ or FASTQ.gz).",
     )(f)
     return f
+
+
+def _resolve_sample_id(sample_id: Optional[str], r1_path: str) -> str:
+    """Return *sample_id* if given, otherwise infer it from *r1_path*."""
+    if sample_id:
+        return sample_id
+    inferred = _infer_sample_id(r1_path)
+    log_info(f"  sample-id : {inferred}  (inferred from {Path(r1_path).name})")
+    return inferred
 
 
 # ---------------------------------------------------------------------------
@@ -173,18 +255,18 @@ def cli():
       viral-id        Viral identification (geNomad)
       quality         Genome quality and selection (CheckV)
       annotate        Structural annotation (Pharokka → Phold → Phynteny)
-      safety          Biosafety screening (CARD + VFDB via Pharokka)
+      safety          Biosafety screening (CARD + VFDB)
       report          Final HTML report per candidate genome
 
     \b
     Or run everything at once:
-      run             Execute all modules for all samples in samples.tsv
+      run             Execute all modules for samples in a directory
 
     \b
     Utilities:
       check-tools     Verify all required tools are installed
       config          Copy default config.yaml template
-      samples         Copy default samples.tsv template
+      init            Initialise a new project directory
     """
 
 
@@ -200,20 +282,20 @@ def cmd_qc(config, workdir, output_dir, reports_dir, threads, force, project,
     """Quality control and trimming for a single sample.
 
     \b
-    Tools   : fastp · FastQC · MultiQC
-    Params  : Q≥20 per-base · mean-Q≥25 · ≤10% low-qual · len≥75 bp
-              poly-X filter · PE overlap correction · adapter auto-detect
-    Ref     : Chen et al. 2018, Genome Biology 19:274
+    --sample-id is optional — derived from the R1 filename when omitted.
 
     \b
-    Example:
-      phageflow qc --sample-id s1 \\
-        --r1 data/s1_R1.fastq.gz --r2 data/s1_R2.fastq.gz
+    Example (explicit):
+      phageflow qc --r1 raw/sampleA_R1.fastq.gz --r2 raw/sampleA_R2.fastq.gz
+
+    Example (explicit sample-id):
+      phageflow qc --sample-id sampleA \\
+        --r1 raw/sampleA_R1.fastq.gz --r2 raw/sampleA_R2.fastq.gz
     """
     cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    sid = _resolve_sample_id(sample_id, r1_path)
     from phageflow.modules.qc import run
-    run(cfg, sample_id=sample_id,
-        r1=Path(r1_path), r2=Path(r2_path), force=force)
+    run(cfg, sample_id=sid, r1=Path(r1_path), r2=Path(r2_path), force=force)
 
 
 # ---------------------------------------------------------------------------
@@ -245,39 +327,27 @@ def cmd_host_removal(config, workdir, output_dir, reports_dir, threads, force, p
     """Remove host reads for a single sample.
 
     \b
-    Modes (priority order):
-      --host-file path        Local FASTA / folder / path-list
-      --accessions GCF,...    Download specific NCBI genomes
-      --accessions-file f.txt Accessions from file
-      (no flag)               Auto-detect hosts with Kraken2
-
-    Singleton reads (unmapped mates) are written to
-    {sample}_singletons.fastq.gz — pass them to assembly --s1
-    to improve DTR/ITR boundary coverage (Nayfach et al. 2021).
-
-    \b
-    Refs: Vasimuddin et al. 2019 (bwa-mem2)
-          Li et al. 2009 (samtools)
-          Wood et al. 2019 (Kraken2)
+    --sample-id is optional — derived from the R1 filename when omitted.
 
     \b
     Example:
-      phageflow host-removal --sample-id s1 \\
-        --r1 results/01_qc/s1_R1.fastq.gz \\
-        --r2 results/01_qc/s1_R2.fastq.gz \\
-        --host-file /path/to/host.fasta
+      phageflow host-removal \\
+        --r1 results/01_qc/sampleA_R1.fastq.gz \\
+        --r2 results/01_qc/sampleA_R2.fastq.gz \\
+        --accessions GCF_000005845.2
     """
-    cfg  = _load(config, workdir, output_dir, reports_dir, threads)
+    cfg  = _load(config, workdir, output_dir, reports_dir, threads, project)
+    sid  = _resolve_sample_id(sample_id, r1_path)
     accs = [a.strip() for a in accessions.split(",")] if accessions else None
     from phageflow.modules.host_removal import run
     run(
-        cfg, sample_id=sample_id,
+        cfg, sample_id=sid,
         r1=Path(r1_path), r2=Path(r2_path),
         force=force,
-        host_file=Path(host_file)          if host_file          else None,
+        host_file=Path(host_file)             if host_file          else None,
         accessions=accs,
-        accessions_file=Path(accessions_file) if accessions_file else None,
-        kraken_db=Path(kraken_db)          if kraken_db          else None,
+        accessions_file=Path(accessions_file) if accessions_file    else None,
+        kraken_db=Path(kraken_db)             if kraken_db          else None,
     )
 
 
@@ -290,31 +360,19 @@ def cmd_host_removal(config, workdir, output_dir, reports_dir, threads, force, p
 @reads_options
 @click.option(
     "--s1", "s1_path", default=None, type=click.Path(),
-    help=(
-        "Singleton reads from host-removal "
-        "(results/02_host_removal/{sample}_singletons.fastq.gz). "
-        "Passed to SPAdes --s1; improves DTR/ITR coverage "
-        "(Nayfach et al. 2021)."
-    ),
+    help="Singleton reads from host-removal step (improves DTR/ITR coverage).",
 )
 def cmd_assembly(config, workdir, output_dir, reports_dir, threads, force, project,
                  sample_id, r1_path, r2_path, s1_path):
     """De novo assembly for a single sample.
 
     \b
-    Tools : SPAdes --isolate --only-assembler + MEGAHIT --no-mercy + cd-hit-est
-    Refs  : Bankevich et al. 2012 · Li et al. 2015 · Fu et al. 2012
-
-    \b
-    Example:
-      phageflow assembly --sample-id s1 \\
-        --r1 results/02_host_removal/s1_R1.fastq.gz \\
-        --r2 results/02_host_removal/s1_R2.fastq.gz \\
-        --s1 results/02_host_removal/s1_singletons.fastq.gz
+    --sample-id is optional — derived from the R1 filename when omitted.
     """
     cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    sid = _resolve_sample_id(sample_id, r1_path)
     from phageflow.modules.assembly import run
-    run(cfg, sample_id=sample_id,
+    run(cfg, sample_id=sid,
         r1=Path(r1_path), r2=Path(r2_path),
         s1=Path(s1_path) if s1_path else None,
         force=force)
@@ -326,34 +384,21 @@ def cmd_assembly(config, workdir, output_dir, reports_dir, threads, force, proje
 
 @cli.command("viral-id")
 @common_options
-@click.option("--sample-id", required=True, help="Sample identifier.")
+@click.option("--sample-id", default=None,
+              help="Sample identifier (derived from --contigs filename when omitted).")
 @click.option(
     "--contigs", required=True, type=click.Path(exists=True),
     help="NR contigs FASTA (output of assembly step).",
 )
 def cmd_viral_id(config, workdir, output_dir, reports_dir, threads, force, project,
                  sample_id, contigs):
-    """Viral identification with geNomad.
-
-    \b
-    Key options (set in config.yaml):
-      genomad.enable_score_calibration: true   (recommended for phage)
-      genomad.composition: virome
-      genomad.lenient_taxonomy: true           (genus-level co-binning)
-      genomad.disable_find_proviruses: true    (purified phage)
-      genomad.sensitivity: 4.2                 (increase to 5.7 for distant relatives)
-
-    \b
-    Ref: Camargo et al. 2023, Nat Biotechnol
-
-    \b
-    Example:
-      phageflow viral-id --sample-id s1 \\
-        --contigs results/03_assembly/combined/s1_contigs_nr.fasta
-    """
+    """Viral identification with geNomad."""
     cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    sid = sample_id or _infer_sample_id(contigs)
+    if not sample_id:
+        log_info(f"  sample-id : {sid}  (inferred from {Path(contigs).name})")
     from phageflow.modules.viral_id import run
-    run(cfg, sample_id=sample_id, contigs=Path(contigs), force=force)
+    run(cfg, sample_id=sid, contigs=Path(contigs), force=force)
 
 
 # ---------------------------------------------------------------------------
@@ -362,30 +407,21 @@ def cmd_viral_id(config, workdir, output_dir, reports_dir, threads, force, proje
 
 @cli.command("quality")
 @common_options
-@click.option("--sample-id", required=True, help="Sample identifier.")
+@click.option("--sample-id", default=None,
+              help="Sample identifier (derived from --virus-fna filename when omitted).")
 @click.option(
     "--virus-fna", required=True, type=click.Path(exists=True),
     help="Viral contigs FASTA (output of viral-id step).",
 )
 def cmd_quality(config, workdir, output_dir, reports_dir, threads, force, project,
                 sample_id, virus_fna):
-    """Genome quality assessment and selection with CheckV.
-
-    Selects Complete/HQ genomes for annotation.
-    Rescues large ND contigs (myovirus rule) and draft co-bins.
-    Concatemers (kmer_freq > threshold) are excluded automatically.
-
-    \b
-    Ref: Nayfach et al. 2021, Nat Biotechnol 39:578
-
-    \b
-    Example:
-      phageflow quality --sample-id s1 \\
-        --virus-fna results/04_viral_id/s1_virus.fna
-    """
+    """Genome quality assessment and selection with CheckV."""
     cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    sid = sample_id or Path(virus_fna).stem.removesuffix("_virus")
+    if not sample_id:
+        log_info(f"  sample-id : {sid}  (inferred from {Path(virus_fna).name})")
     from phageflow.modules.quality import run
-    run(cfg, sample_id=sample_id, virus_fna=Path(virus_fna), force=force)
+    run(cfg, sample_id=sid, virus_fna=Path(virus_fna), force=force)
 
 
 # ---------------------------------------------------------------------------
@@ -394,37 +430,35 @@ def cmd_quality(config, workdir, output_dir, reports_dir, threads, force, projec
 
 @cli.command("annotate")
 @common_options
-@click.option("--sample-id", required=True, help="Sample identifier.")
+@click.option("--sample-id", default=None,
+              help="Sample identifier (derived from --genome filename when omitted).")
 @click.option(
     "--genome", required=True, type=click.Path(exists=True),
     help="Genome FASTA from quality step (annotation_ready/).",
 )
 def cmd_annotate(config, workdir, output_dir, reports_dir, threads, force, project,
                  sample_id, genome):
-    """Structural and functional annotation.
-
-    \b
-    Pipeline:
-      Pharokka  → base GBK (PHANOTATE + PHROGs + tRNA/CRISPR)
-      Phold     → improved /product via ProstT5 + Foldseek
-      Phynteny  → /phynteny_* qualifiers via transformer + ESM2
-      Merge     → canonical GBK (CDS from Phynteny · non-CDS from Pharokka)
-
-    Genetic code is read from geNomad output per candidate.
-    dnaapler reorientation applied only to DTR (circular) genomes.
-
-    \b
-    Refs: Bouras et al. 2023 (Pharokka) · Bouras et al. 2025 (Phold)
-          Grigson et al. 2025 (Phynteny) · Bouras et al. 2024 (dnaapler)
-
-    \b
-    Example:
-      phageflow annotate --sample-id s1 \\
-        --genome results/05_quality/s1/annotation_ready/phages/Podoviridae_candidate_001.fasta
-    """
+    """Structural and functional annotation (Pharokka → Phold → Phynteny)."""
     cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    # genome path: results/05_quality/{sample_id}/annotation_ready/phages/{candidate}.fasta
+    # Try to recover sample_id from path structure before falling back to stem.
+    sid = sample_id or _sample_id_from_genome_path(genome)
+    if not sample_id:
+        log_info(f"  sample-id : {sid}  (inferred from path)")
     from phageflow.modules.annotate import run
-    run(cfg, sample_id=sample_id, genome=Path(genome), force=force)
+    run(cfg, sample_id=sid, genome=Path(genome), force=force)
+
+
+def _sample_id_from_genome_path(genome: str) -> str:
+    """Walk up the genome path looking for the annotation_ready/phages structure."""
+    p = Path(genome).resolve()
+    parts = p.parts
+    try:
+        idx = parts.index("annotation_ready")
+        # structure: .../{sample_id}/annotation_ready/phages/{candidate}.fasta
+        return parts[idx - 1]
+    except ValueError:
+        return p.stem
 
 
 # ---------------------------------------------------------------------------
@@ -433,22 +467,15 @@ def cmd_annotate(config, workdir, output_dir, reports_dir, threads, force, proje
 
 @cli.command("safety")
 @common_options
-@click.option("--sample-id", required=True, help="Sample identifier.")
-@click.option(
-    "--genome", required=True, type=click.Path(exists=True),
-    help="Genome FASTA.",
-)
+@click.option("--sample-id", default=None, help="Sample identifier.")
+@click.option("--genome", required=True, type=click.Path(exists=True))
 def cmd_safety(config, workdir, output_dir, reports_dir, threads, force, project,
                sample_id, genome):
-    """Biosafety screening: CARD + VFDB via Pharokka output.
-
-    \b
-    Example:
-      phageflow safety --sample-id s1 --genome candidate.fasta
-    """
+    """Biosafety screening: CARD + VFDB."""
     cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    sid = sample_id or _sample_id_from_genome_path(genome)
     from phageflow.modules.safety import run
-    run(cfg, sample_id=sample_id, genome=Path(genome), force=force)
+    run(cfg, sample_id=sid, genome=Path(genome), force=force)
 
 
 # ---------------------------------------------------------------------------
@@ -457,37 +484,46 @@ def cmd_safety(config, workdir, output_dir, reports_dir, threads, force, project
 
 @cli.command("report")
 @common_options
-@click.option("--sample-id", required=True, help="Sample identifier.")
-@click.option(
-    "--candidate-id", required=True,
-    help="Candidate genome ID (e.g. Podoviridae_candidate_001).",
-)
+@click.option("--sample-id", default=None, help="Sample identifier.")
+@click.option("--candidate-id", required=True,
+              help="Candidate genome ID (e.g. Podoviridae_candidate_001).")
 def cmd_report(config, workdir, output_dir, reports_dir, threads, force, project,
                sample_id, candidate_id):
-    """Generate final HTML report for one annotated candidate genome.
-
-    Aggregates metrics from all previous modules into a single
-    self-contained HTML file per candidate.
-
-    \b
-    Example:
-      phageflow report --sample-id s1 \\
-        --candidate-id Podoviridae_candidate_001
-    """
+    """Generate final HTML report for one annotated candidate genome."""
     cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    if not sample_id:
+        log_error("--sample-id is required for the report command.")
+        sys.exit(1)
     from phageflow.modules.report import run
     run(cfg, sample_id=sample_id, candidate_id=candidate_id, force=force)
 
 
 # ---------------------------------------------------------------------------
-# run  (master runner — executes all modules for all samples)
+# run  (master runner — directory-based, no samples.tsv)
 # ---------------------------------------------------------------------------
 
 @cli.command("run")
 @common_options
 @click.option(
+    "--raw-dir", "raw_dir",
+    default=None, type=click.Path(),
+    help=(
+        "Directory containing paired FASTQ files.  "
+        "Pairs are auto-detected by *_R1* / *_R2* naming.  "
+        "[default: <project>/raw/  or  raw/]"
+    ),
+)
+@click.option(
+    "--r1", "r1_list", multiple=True, type=click.Path(exists=True),
+    help="R1 reads for a specific sample (repeat for multiple samples).",
+)
+@click.option(
+    "--r2", "r2_list", multiple=True, type=click.Path(exists=True),
+    help="R2 reads — must match --r1 in order.",
+)
+@click.option(
     "--host-file", default=None, type=click.Path(),
-    help="Host reference FASTA / folder / path-list (passed to host-removal).",
+    help="Host reference FASTA / folder / path-list.",
 )
 @click.option(
     "--accessions", default=None,
@@ -504,31 +540,106 @@ def cmd_report(config, workdir, output_dir, reports_dir, threads, force, project
     help="Resume pipeline from this module (skip earlier steps).",
 )
 def cmd_run(config, workdir, output_dir, reports_dir, threads, force, project,
-            host_file, accessions, from_module):
-    """Run the full pipeline for all samples in samples.tsv.
-
-    Executes in order: qc → host-removal → assembly → viral-id → quality
-    → [for each candidate: annotate → safety → report]
-
-    Failures in one sample are logged and the pipeline continues with
-    the next sample. Use --from-module to resume an interrupted run.
+            raw_dir, r1_list, r2_list, host_file, accessions, from_module):
+    """Run the full pipeline for all samples.
 
     \b
-    Example:
-      phageflow run --host-file /path/to/host.fasta
+    Sample discovery (priority order):
+      1. --r1 / --r2 pairs supplied directly
+      2. --raw-dir DIR  (scans DIR for *_R1*.fastq.gz + matching R2)
+      3. <project>/raw/ or raw/  (default when using --project or init)
 
-      phageflow run --host-file /path/to/host.fasta \\
-        --from-module quality -o /data/results
+    \b
+    Examples:
+      # Auto-detect samples from raw/ directory
+      phageflow run --project /data/myproject --accessions GCF_000005845.2
+
+      # Explicit pairs (no directory scan)
+      phageflow run \\
+        --r1 raw/s1_R1.fastq.gz --r2 raw/s1_R2.fastq.gz \\
+        --r1 raw/s2_R1.fastq.gz --r2 raw/s2_R2.fastq.gz \\
+        --host-file /path/to/host.fasta
+
+      # Resume from quality step
+      phageflow run --project /data/myproject --from-module quality
     """
-    cfg  = _load(config, workdir, output_dir, reports_dir, threads)
+    cfg  = _load(config, workdir, output_dir, reports_dir, threads, project)
     accs = [a.strip() for a in accessions.split(",")] if accessions else None
+
+    # ── Resolve pairs ─────────────────────────────────────────────────────────
+    pairs: list[tuple[Path, Path]] = []
+
+    if r1_list and r2_list:
+        if len(r1_list) != len(r2_list):
+            log_error("Number of --r1 and --r2 arguments must match.")
+            sys.exit(1)
+        pairs = [(Path(r1), Path(r2)) for r1, r2 in zip(r1_list, r2_list)]
+        log_info(f"  Samples : {len(pairs)} pair(s) from explicit --r1/--r2 arguments")
+
+    elif r1_list and not r2_list:
+        log_error("--r1 provided without matching --r2.  Provide both.")
+        sys.exit(1)
+
+    else:
+        # Auto-discover from a directory
+        search_dirs: list[Path] = []
+        if raw_dir:
+            search_dirs = [Path(raw_dir)]
+        elif project:
+            search_dirs = [Path(project) / "raw"]
+        else:
+            # Try raw/ relative to workdir or cwd
+            wd = Path(workdir) if workdir else Path(".")
+            search_dirs = [wd / "raw", wd]
+
+        for d in search_dirs:
+            if d.is_dir():
+                pairs = _find_read_pairs(d)
+                if pairs:
+                    log_info(f"  Samples : {len(pairs)} pair(s) discovered in {d}")
+                    break
+                log_info(f"  Scanned {d} — no FASTQ pairs found")
+
+    if not pairs:
+        log_error(
+            "No sample pairs found.  Provide --r1/--r2, --raw-dir, "
+            "or place FASTQ files in <project>/raw/."
+        )
+        sys.exit(1)
+
+    # ── Run pipeline ──────────────────────────────────────────────────────────
     from phageflow.modules.runner import run
     run(
-        cfg, force=force,
+        cfg,
+        pairs=pairs,
+        force=force,
         host_file=Path(host_file) if host_file else None,
         accessions=accs,
         from_module=from_module,
     )
+
+
+# ---------------------------------------------------------------------------
+# assembly-refine
+# ---------------------------------------------------------------------------
+
+@cli.command("assembly-refine")
+@common_options
+@reads_options
+@click.option("--s1", "s1_path", default=None, type=click.Path())
+def cmd_assembly_refine(config, workdir, output_dir, reports_dir, threads,
+                        force, project, sample_id, r1_path, r2_path, s1_path):
+    """Iterative assembly refinement using annotation_ready candidates as anchors.
+
+    Run AFTER quality.  --sample-id is optional.
+    """
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    sid = _resolve_sample_id(sample_id, r1_path)
+    from phageflow.modules.assembly_refine import run
+    run(cfg, sample_id=sid,
+        r1=Path(r1_path), r2=Path(r2_path),
+        s1=Path(s1_path) if s1_path else None,
+        force=force)
 
 
 # ---------------------------------------------------------------------------
@@ -543,48 +654,23 @@ def cmd_check_tools(config):
     log_header(__version__)
     log_step("Checking required tools")
 
-    # samtools legacy check FIRST — critical for host-removal.
     _check_samtools_version()
 
     TOOLS: dict[str, list[tuple[str, Optional[str], str]]] = {
-        # category: [(tool, version_flag, install_hint)]
-        "QC": [
-            ("fastp",   "--version", ""),
-            ("fastqc",  "--version", ""),
-            ("multiqc", "--version", ""),
-        ],
-        "Host removal": [
-            ("bwa-mem2",  "version",    ""),
-            ("samtools",  "--version",  "must be ≥1.15"),
-            ("seqtk",     None,         ""),
-            ("pigz",      "--version",  "optional — parallel gzip"),
-        ],
-        "Assembly": [
-            ("spades.py",  "--version", ""),
-            ("megahit",    "--version", ""),
-            ("cd-hit-est", None,        ""),
-        ],
-        "Viral ID": [
-            ("genomad", "--version", ""),
-        ],
-        "Quality": [
-            ("checkv", None,        ""),
-            ("mash",   "--version", "required for circular-safe dereplication"),
-            ("seqkit", "--version", ""),
-        ],
-        "Annotation": [
-            ("pharokka.py",          "--version", ""),
-            ("phold",                "--version", ""),
-            ("phynteny_transformer", "--version", ""),
-            ("dnaapler",             "--version", ""),
-        ],
-        "Safety": [
-            ("abricate", "--version", ""),
-        ],
-        "Databases": [
-            ("datasets", "version",    "NCBI datasets CLI"),
-            ("kraken2",  "--version",  "optional — auto host detection"),
-        ],
+        "QC":         [("fastp", "--version", ""), ("fastqc", "--version", ""),
+                       ("multiqc", "--version", "")],
+        "Host removal": [("bwa-mem2", "version", ""), ("samtools", "--version", "must be ≥1.15"),
+                         ("seqtk", None, ""), ("pigz", "--version", "optional")],
+        "Assembly":   [("spades.py", "--version", ""), ("megahit", "--version", ""),
+                       ("cd-hit-est", None, "")],
+        "Viral ID":   [("genomad", "--version", "")],
+        "Quality":    [("checkv", None, ""), ("mash", "--version", ""),
+                       ("seqkit", "--version", "")],
+        "Annotation": [("pharokka.py", "--version", ""), ("phold", "--version", ""),
+                       ("phynteny_transformer", "--version", ""), ("dnaapler", "--version", "")],
+        "Safety":     [("abricate", "--version", "")],
+        "Databases":  [("datasets", "version", "NCBI datasets CLI"),
+                       ("kraken2", "--version", "optional")],
     }
 
     all_ok = True
@@ -600,38 +686,20 @@ def cmd_check_tools(config):
                 if tool not in ("pigz", "kraken2", "datasets"):
                     all_ok = False
 
-    n_total   = multiprocessing.cpu_count()
-    n_default = _default_threads()
+    n_total = multiprocessing.cpu_count()
     print()
-    log_info(
-        f"System  : {n_total} logical CPU(s) | "
-        f"default threads = {n_default} (90% auto-detected)"
-    )
+    log_info(f"System  : {n_total} logical CPU(s) | default threads = {_AUTO_THREADS}")
     print()
     if all_ok:
         log_ok("All required tools found.")
     else:
-        log_warn(
-            "Some required tools are missing. "
-            "Activate the phageflow conda environment: conda activate phageflow"
-        )
+        log_warn("Some required tools are missing. Run: conda activate phageflow")
 
 
 def _check_samtools_version() -> None:
-    """Warn if legacy samtools 0.1.x is active.
-
-    abricate / blast-legacy pull in samtools=0.1.19 as a conda dependency.
-    This version does NOT implement -N or --singleton, which are required
-    by the bwa-mem2 host-removal pipeline (Module 02).
-
-    Fix:
-        mamba install -n phageflow "samtools>=1.15"
-    """
     try:
-        r = subprocess.run(
-            ["samtools", "--version"],
-            capture_output=True, text=True, timeout=10,
-        )
+        r = subprocess.run(["samtools", "--version"],
+                           capture_output=True, text=True, timeout=10)
         first = r.stdout.strip().split("\n")[0]
         parts = first.split()
         if len(parts) >= 2:
@@ -640,8 +708,6 @@ def _check_samtools_version() -> None:
             if (major, minor) < (1, 15):
                 log_warn(
                     f"\n  *** CRITICAL: samtools {ver_str} on PATH is the LEGACY version ***\n"
-                    "  The host-removal pipeline requires samtools ≥1.15 for\n"
-                    "  the -N and --singleton flags (Li et al. 2009).\n"
                     "  Fix: mamba install -n phageflow 'samtools>=1.15'\n"
                 )
     except Exception:
@@ -649,7 +715,7 @@ def _check_samtools_version() -> None:
 
 
 # ---------------------------------------------------------------------------
-# config / samples templates
+# config
 # ---------------------------------------------------------------------------
 
 @cli.command("config")
@@ -667,31 +733,8 @@ def cmd_config(output):
     log_ok(f"Config written to {dst}")
 
 
-@cli.command("samples")
-@click.option("-o", "--output", default="config/samples.tsv", show_default=True)
-def cmd_samples(output):
-    """Copy the default samples.tsv template to OUTPUT."""
-    import shutil
-    from importlib.resources import files
-    dst = Path(output)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(
-        str(files("phageflow.config").joinpath("default_samples.tsv")),
-        dst,
-    )
-    log_ok(f"Samples template written to {dst}")
-
-
 # ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    cli()
-
-
-# ---------------------------------------------------------------------------
-# phageflow init
+# init
 # ---------------------------------------------------------------------------
 
 @cli.command("init")
@@ -705,15 +748,18 @@ def cmd_init(project_dir, force):
     Creates:
       PROJECT/
         config/config.yaml      ← copy of default config
-        config/samples.tsv      ← sample manifest template
-        raw/                    ← place your FASTQ files here
+        raw/                    ← place your FASTQ files here (auto-detected)
         results/                ← pipeline outputs
         reports/                ← logs, TSVs, HTML reports
 
     \b
-    After init, run from the project directory or use --project:
-      cd PROJECT && phageflow qc --sample-id s1 --r1 raw/s1_R1.fastq.gz ...
-      phageflow qc --project PROJECT --sample-id s1 ...
+    No samples manifest is needed — PhageFlow discovers FASTQ pairs in raw/.
+
+    \b
+    Next steps:
+      1. Copy FASTQ files to PROJECT/raw/
+      2. Edit PROJECT/config/config.yaml  (databases, threads, hosts …)
+      3. phageflow run --project PROJECT --accessions GCF_XXXXXXXX.X
     """
     import shutil as _sh
     from importlib.resources import files as _files
@@ -723,58 +769,41 @@ def cmd_init(project_dir, force):
     if (p / "config" / "config.yaml").exists() and not force:
         log_warn(
             f"  {p} already contains a config. "
-            "Use --force to re-initialize (existing config will be overwritten)."
+            "Use --force to re-initialize."
         )
         return
 
     for sub in ("config", "raw", "results", "reports"):
         (p / sub).mkdir(parents=True, exist_ok=True)
 
-    # Copy default config
     cfg_dst = p / "config" / "config.yaml"
     _sh.copy(
         str(_files("phageflow.config").joinpath("default_config.yaml")),
         cfg_dst,
     )
 
-    # Write samples.tsv template
-    samples_dst = p / "config" / "samples.tsv"
-    if not samples_dst.exists() or force:
-        samples_dst.write_text(
-            "sample_id\tr1\tr2\n"
-            "# example\traw/example_R1.fastq.gz\traw/example_R2.fastq.gz\n"
-        )
-
-    # Write .phageflow marker
     (p / ".phageflow").write_text(f"project_dir: {p.resolve()}\n")
 
     log_ok(f"Project initialized at {p.resolve()}")
     log_info(f"  Config   : {cfg_dst}")
-    log_info(f"  Samples  : {samples_dst}")
     log_info(f"  Raw reads: place FASTQ files in {p / 'raw'}/")
     log_info("")
     log_info("  Next steps:")
-    log_info(f"    1. Edit {samples_dst}")
-    log_info(f"    2. Edit {cfg_dst}  (databases, threads, etc.)")
-    log_info(f"    3. phageflow qc --project {p} --sample-id SAMPLE_ID --r1 ... --r2 ...")
+    log_info(f"    1. Copy FASTQ files to {p / 'raw'}/")
+    log_info(f"    2. Edit {cfg_dst}")
+    log_info(f"    3. phageflow run --project {p} --accessions GCF_XXXXXXXX.X")
 
 
 # ---------------------------------------------------------------------------
-# phageflow status
+# status
 # ---------------------------------------------------------------------------
 
 @cli.command("status")
-@click.option("--project", default=None, type=click.Path(),
-              help="Project directory. Defaults to current directory.")
-@click.option("--sample-id", default=None,
-              help="Filter to a specific sample.")
+@click.option("--project", default=None, type=click.Path())
+@click.option("--sample-id", default=None)
 def cmd_status(project, sample_id):
-    """Show pipeline status for all samples in a project.
-
-    \b
-    Reads pipeline_status.tsv from the project reports directory.
-    Status is written automatically by each pipeline module.
-    """
+    """Show pipeline status for all samples in a project."""
+    from rich.console import Console
     from rich.table import Table
     from phageflow.utils import status as _status
 
@@ -788,6 +817,7 @@ def cmd_status(project, sample_id):
     if sample_id:
         rows = [r for r in rows if r.get("sample_id") == sample_id]
 
+    console = Console()
     table = Table(title="PhageFlow Pipeline Status", show_lines=True)
     table.add_column("Sample",   style="cyan",  min_width=12)
     table.add_column("Module",   style="white", min_width=14)
@@ -819,44 +849,8 @@ def cmd_status(project, sample_id):
 
 
 # ---------------------------------------------------------------------------
-# assembly-refine
+# Entry point
 # ---------------------------------------------------------------------------
 
-@cli.command("assembly-refine")
-@common_options
-@click.option("--sample-id",  required=True, help="Sample identifier.")
-@click.option("--r1",  "r1_path", required=True, type=click.Path(exists=True),
-              help="R1 reads (from host-removal step).")
-@click.option("--r2",  "r2_path", required=True, type=click.Path(exists=True),
-              help="R2 reads (from host-removal step).")
-@click.option("--s1",  "s1_path", default=None, type=click.Path(),
-              help="Singleton reads from bwa-mem2 host-removal (optional).")
-def cmd_assembly_refine(config, workdir, output_dir, reports_dir, threads,
-                        force, project, sample_id, r1_path, r2_path, s1_path):
-    """Iterative assembly refinement using annotation_ready candidates as anchors.
-
-    \b
-    Run AFTER quality. Uses annotation_ready candidates as --trusted-contigs
-    and unmapped + bridge reads to extend through repeat-induced gaps.
-    Replaces fragmented candidates with more complete assemblies when possible.
-
-    \b
-    References:
-      Bankevich et al. 2012, J Comput Biol 19:455 (SPAdes trusted-contigs)
-      Wan et al. 2023, mSystems 8:e01334 (iterative phage assembly)
-
-    \b
-    Example:
-      phageflow assembly-refine --sample-id test4 \\
-        --r1 results/02_host_removal/test4_R1.fastq.gz \\
-        --r2 results/02_host_removal/test4_R2.fastq.gz \\
-        --s1 results/02_host_removal/test4_singletons.fastq.gz
-    """
-    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
-    from phageflow.modules.assembly_refine import run
-    run(
-        cfg, sample_id=sample_id,
-        r1=Path(r1_path), r2=Path(r2_path),
-        s1=Path(s1_path) if s1_path else None,
-        force=force,
-    )
+if __name__ == "__main__":
+    cli()
