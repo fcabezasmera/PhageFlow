@@ -1,9 +1,0 @@
-# PhageFlow samples manifest
-# Columns: sample_id, r1, r2  (reads mode)
-#       or sample_id, contigs  (pre-assembled mode — skips QC, host-removal, assembly)
-#
-# Examples:
-#   sample1	/path/sample1_R1.fastq.gz	/path/sample1_R2.fastq.gz
-#   contig1	/path/contigs.fasta	(leave r1/r2 blank or omit columns)
-sample_id	r1	r2
-sample1	/path/to/sample1_R1.fastq.gz	/path/to/sample1_R2.fastq.gz
