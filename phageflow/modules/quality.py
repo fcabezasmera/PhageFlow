@@ -1,70 +1,112 @@
-"""PhageFlow Module 05 — Genome quality assessment and selection.
+"""PhageFlow Module 05 — Genome quality assessment and selection (CheckV).
 
-Goal: maximize recovery of Complete and High-quality phage genomes.
+Goal: evaluate viral contigs produced by viral_id, assign quality tiers,
+dereplicate near-identical candidates, co-bin low-quality contigs by taxon,
+and produce annotation-ready FASTA files for annotate.py.
 
-Tools:
-    CheckV v1.0+ (Nayfach et al. 2021, Nature Biotechnology 39:578)
-    mash v2.3   (Ondov et al. 2016, Genome Biology 17:132)   -- all contigs when available
-    cd-hit-est  (Fu et al. 2012, Bioinformatics 28:3150)     -- fallback only
-    seqkit      (Shen et al. 2016, PLoS ONE 11:e0163962)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tool: CheckV end-to-end
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Output structure (all outputs namespaced under results/05_quality/{sample_id}/):
+CheckV estimates completeness via AAI against a curated viral genome DB
+and via HMM-based gene content (Nayfach et al. 2021, Nat Biotechnol 39:578).
 
-    results/05_quality/{sample_id}/
-    ├── annotation_ready/
-    │   ├── phages/         ← HQ phage candidate FASTAs
-    │   └── proviruses/     ← HQ provirus candidate FASTAs
-    ├── checkv/             ← raw CheckV output (quality_summary.tsv, etc.)
-    ├── drafts/             ← LQ/ND rescued FASTAs not yet annotation-ready
-    └── tmp/                ← temporary files (removed after run)
+Completeness methods:
+  AAI-based  : alignment against CheckV reference genomes (most precise)
+  HMM-based  : gene-content based lower bound (used when no close reference)
 
-    reports/05_quality/
-    ├── checkv_summary.tsv          ← aggregated across all samples
-    ├── {sample_id}_rename_map.tsv
-    └── {sample_id}_checkv.log
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Quality tiers
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    Namespacing all outputs under results/05_quality/{sample_id}/ keeps each
-    sample fully self-contained and simplifies multi-sample runs: deleting or
-    reprocessing one sample never touches another's files.
+  complete     CheckV = Complete (DTR or ITR detected)  → annotation_ready/
+  high-quality completeness ≥ 90%                       → annotation_ready/
+  medium-quality completeness ≥ min_completeness (50%)  → annotation_ready/
+  large-nd     ND, length ≥ large_nd_rescue_bp (30 kb), ≥1 viral gene
+               Captures jumbo phages with no CheckV reference.
+                                                        → annotation_ready/
+  lq-draft     length ≥ length_rescue (10 kb), ≥ min_viral_genes (1)
+               Candidate for co-binning by taxon.       → drafts/ or bin
+  bin-rescue   LQ drafts grouped by naming_level,
+               combined length ≥ min_bin_rescue_bp (30 kb)
+                                                        → annotation_ready/
+  discarded    length < min_contig_bp or no viral genes
 
-Dereplication strategy:
-    mash is used for ALL contig sizes when available.
-    Rationale: bacteriophage genomes are frequently circular. Different
-    assemblers (SPAdes, MEGAHIT) linearize the same circular genome at
-    different positions, producing circular permutations. cd-hit-est uses
-    linear alignment and cannot detect permutations: individual HSPs each
-    cover only a fraction of the sequence, failing the -aS threshold even
-    when combined coverage is 100%. Inoviridae (ssDNA, ~6 kb) is the
-    canonical example, but the same applies to any circular phage genome.
-    mash computes MinHash distances from k-mer composition, which is
-    invariant to rotation — two permutations of the same circular sequence
-    have distance ≈ 0 and are correctly clustered (Ondov et al. 2016).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Topology resolution
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    Threshold: _MASH_ANI_THRESH = 0.02 (= ANI > 98%; Turner et al. 2021,
-    Arch Virol 166:2633)
+  CheckV termini_type takes PRECEDENCE over geNomad topology:
+  CheckV confirms DTR/ITR in the actual assembled sequence (≥20 bp repeat),
+  whereas geNomad topology is predicted from sequence composition.
 
-    Fallback (mash not in PATH): cd-hit-est at 98% ANI for all sizes.
-    A _LARGE_CONTIG_BP split (50 kb) is applied only in the cd-hit-est
-    fallback because cd-hit-est's alignment band cannot reliably span
-    large-genome indels between assemblers (Fu et al. 2012).
+  Priority:  CheckV DTR → "DTR"
+             CheckV ITR → "ITR"
+             CheckV NA  → use geNomad topology as context
+                          "No terminal repeats" or "NA"
 
-Taxonomy path:
-    Reads genomad_tax_tsv from viral-id's genomad_summary.tsv.
-    Falls back to convention-based path for backward compatibility.
+  DTR  : circular genome (most tailed dsDNA phages)
+  ITR  : linear genome with ITR (e.g. T7-like Autographiviridae)
+  other: undetermined topology
 
-Completeness in rename_map:
-    'ND' for Not-determined genomes (not '0.0', which is misleading).
+  Downstream impact (annotate.py):
+    DTR  → circular map (phold), dnaapler phage reorientation
+    ITR  → linear map (pyGenomeViz), dnaapler phage (finds terL, no circular implied)
+    other → linear map
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Dereplication (mash)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Applied to single-contig annotation_ready candidates only.
+  Clusters at mash distance < 0.02 (ANI > 98%).
+  The ICTV species boundary is 95% ANI; 98% is the same strain.
+  Turner et al. 2021, Arch Virol 166:2633.
+
+  Within each cluster: keep the longest contig.
+  Discarded duplicates are logged in rename_map.tsv (tier = dereplicated).
+  Fallback: cd-hit-est at 98% if mash is not available.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Special case warnings (never discards — always WARN only)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Concatemer  kmer_freq > max_kmer_freq (1.5) OR genome_copies > 1.5
+              High-coverage purified preps accumulate DNA concatemers
+              during lytic replication. The sequence is valid; the contig
+              may represent N linked copies of the genome.
+  Host genes  host_genes > 0: possible residual host contamination
+              that survived host removal.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Output files
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  results/05_quality/{sample_id}/
+      annotation_ready/phages/
+          {naming_level}_candidate_001.fasta
+      annotation_ready/proviruses/
+      drafts/
+          {naming_level}_draft_001.fasta
+      checkv/                       ← CheckV raw output
+
+  reports/05_quality/{sample_id}/
+      rename_map.tsv                ← contig→candidate + ALL metadata
+      quality_summary.tsv           ← module summary
+      {sample_id}_quality.log
 """
 
 from __future__ import annotations
+import csv
+import math
 import shutil
 import subprocess
-from collections import defaultdict
-from dataclasses import dataclass, field
+import tempfile
+from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Optional
 
 from rich.panel import Panel
-from rich.text import Text
 from rich.progress import (
     Progress, SpinnerColumn, TextColumn,
     BarColumn, MofNCompleteColumn, TimeElapsedColumn,
@@ -74,139 +116,115 @@ from phageflow.utils.config import Config
 from phageflow.utils.logger import (
     log_step, log_info, log_ok, log_warn, log_error, console,
 )
-from phageflow.utils.tools import (
-    require_tools, run_silent, human_size, mkdirs, fasta_stats,
-)
+from phageflow.utils.tools import require_tools, run_silent, mkdirs
 
 STEP  = "05_quality"
-TOOLS = ["checkv", "cd-hit-est", "seqkit"]
+TOOLS = ["checkv"]
 
-_COMPLETENESS_GOOD = 90.0
-_COMPLETENESS_WARN = 50.0
-_CONTAM_WARN       = 5.0
-_HOST_GENE_WARN    = 3
+# Quality tier constants
+_TIER_COMPLETE  = "complete"
+_TIER_HQ        = "high-quality"
+_TIER_MQ        = "medium-quality"
+_TIER_LARGE_ND  = "large-nd"
+_TIER_LQ_DRAFT  = "lq-draft"
+_TIER_BIN       = "bin-rescue"
+_TIER_DEREP     = "dereplicated"
+_TIER_DISCARD   = "discarded"
 
-_CDHIT_ID = "0.98"
-_CDHIT_AS = "0.85"
-_CDHIT_N  = "8"
+# Tiers that go to annotation_ready (before dereplication / co-binning)
+_ANNOTATION_TIERS = {_TIER_COMPLETE, _TIER_HQ, _TIER_MQ, _TIER_LARGE_ND}
 
-# Dereplication thresholds
-# _LARGE_CONTIG_BP is only used in the cd-hit-est FALLBACK path.
-# When mash is available it is NOT used — mash handles all sizes uniformly.
-_LARGE_CONTIG_BP  = 50_000   # cd-hit-est fallback only: >= this -> wider band
-_MASH_ANI_THRESH  = 0.02     # distance < 0.02 = ANI > 98% (Turner et al. 2021)
-_MASH_SKETCH_SIZE = "10000"  # MinHash sketch size
+# CheckV quality column values
+_CKV_COMPLETE = "Complete"
+_CKV_HQ       = "High-quality"
+_CKV_MQ       = "Medium-quality"
+_CKV_LQ       = "Low-quality"
+_CKV_ND       = "Not-determined"
 
-_TIER_ORDER = [
-    "Complete", "High-quality", "Medium-quality", "Low-quality", "Not-determined"
-]
-_HIGH_CONFIDENCE_TIERS = frozenset({"Complete", "High-quality"})
+# Mash ANI dereplication threshold (>98% ANI → same strain)
+# ICTV species boundary is 95% ANI. Turner et al. 2021, Arch Virol 166:2633.
+_MASH_DIST_THRESH = 0.02
 
-
-# -- Data structure ------------------------------------------------------------
-
-@dataclass
-class ContigRecord:
-    contig_id:         str
-    sequence:          str
-    length_bp:         int
-    completeness:      float
-    completeness_str:  str    # 'ND' for Not-determined, '85.3' otherwise
-    quality_tier:      str
-    is_provirus:       bool
-    viral_genes:       int
-    is_multicontig:    bool = False
-    sub_records:       list = field(default_factory=list)
+# Genome size threshold for dereplication method selection.
+# < threshold : minimap2 asm5 (mash unreliable on small genomes — sparse sketch)
+# ≥ threshold : mash (fast pairwise on full genome k-mer content)
+_SMALL_GENOME_THRESH = 20_000
 
 
-# -- Public entry point --------------------------------------------------------
+# ── Public entry point ────────────────────────────────────────────────────────
 
 def run(
-    cfg:       Config,
-    sample_id: str,
-    virus_fna: Path,
-    force:     bool = False,
-) -> list[Path]:
-    """
-    Assess genome quality, rescue, dereplicate, co-bin, and format candidates.
+    cfg:          Config,
+    sample_id:    str,
+    virus_fna:    Path,
+    force:        bool = False,
+    metadata_tsv: Optional[Path] = None,
+) -> tuple[Path, Path]:
+    """Quality assessment and candidate selection for a single sample.
 
-    All outputs go to results/05_quality/{sample_id}/ with subdirectories:
-        annotation_ready/phages/    HQ phage FASTAs
-        annotation_ready/proviruses/ HQ provirus FASTAs
-        checkv/                     raw CheckV output
-        drafts/                     rescued draft FASTAs
+    Parameters
+    ----------
+    virus_fna    : viral FASTA from viral_id step
+    metadata_tsv : per-contig metadata from viral_id (topology, genetic_code).
+                   Auto-discovered from results/04_viral_id/ if not provided.
 
     Returns
     -------
-    hq_fastas : list of annotation-ready FASTA paths
+    (annotation_ready_dir, drafts_dir)
     """
-    require_tools(*TOOLS)
-
     virus_fna = Path(virus_fna)
-    out_dir   = cfg.results(STEP)
-    rpt_dir   = cfg.reports(STEP)
+    out_dir   = cfg.results(STEP) / sample_id
+    rpt_dir   = cfg.reports(STEP) / sample_id
+    checkv_dir = out_dir / "checkv"
+    ann_phages = out_dir / "annotation_ready" / "phages"
+    ann_prov   = out_dir / "annotation_ready" / "proviruses"
+    drafts_dir = out_dir / "drafts"
+    log_f      = rpt_dir / f"{sample_id}_quality.log"
+    mkdirs(out_dir, rpt_dir, checkv_dir, ann_phages, ann_prov, drafts_dir)
 
-    # All per-sample outputs live under results/05_quality/{sample_id}/
-    # This keeps each sample fully self-contained: deleting or reprocessing
-    # one sample never touches another's files.
-    sample_dir  = out_dir / sample_id
-    phage_dir   = sample_dir / "annotation_ready" / "phages"
-    prov_dir    = sample_dir / "annotation_ready" / "proviruses"
-    draft_dir   = sample_dir / "drafts"
-    checkv_dir  = sample_dir / "checkv"
-    tmp_dir     = sample_dir / "tmp"
-    mkdirs(out_dir, rpt_dir, phage_dir, prov_dir, draft_dir, checkv_dir, tmp_dir)
+    log_step(f"Module 05 — quality  [{sample_id}]")
+    log_info(f"  Viral FASTA : {virus_fna}")
 
-    log_step(f"Module 05 -- quality [{sample_id}]")
+    if not virus_fna.exists() or virus_fna.stat().st_size == 0:
+        log_warn("  Viral FASTA is empty — no candidates to evaluate.")
+        return ann_phages, drafts_dir
 
-    if not virus_fna.exists():
-        log_error(f"  Virus FASTA not found: {virus_fna}")
-        raise FileNotFoundError(virus_fna)
-    if virus_fna.stat().st_size == 0:
-        log_warn(f"  Virus FASTA is empty -- no genomes to assess: {virus_fna}")
-        return []
-
-    s = fasta_stats(virus_fna)
-    _print_input_table(sample_id, virus_fna, s)
-    log_info(
-        f"  CheckV  (Nayfach et al. 2021)  |  "
-        f"HQ threshold >={cfg.checkv.min_completeness}%  |  "
-        f"Complete/HQ always promoted"
-    )
-    log_info(
-        f"  Rescue  : LQ >=1 gene | ND >={cfg.checkv.length_rescue:,}bp -> drafts/ | "
-        f"ND >={cfg.checkv.large_nd_rescue_bp:,}bp -> annotation_ready/"
-    )
-
-    import shutil as _sh
-    _dedup_tool = "mash" if _sh.which("mash") else "cd-hit-est (fallback)"
-    log_info(
-        f"  Dedup   : {_dedup_tool} {_MASH_ANI_THRESH*100:.0f}% dist threshold "
-        f"(all sizes, circular-safe) | Ondov et al. 2016"
-    )
-    log_info(
-        f"  Co-bin  : >=30kb shared-taxonomy drafts -> annotation_ready/ | "
-        f"output: {sample_id}/annotation_ready/{{phages,proviruses}}/"
-    )
-
-    if not cfg.databases.checkv.exists():
-        log_warn(f"  CheckV database not found: {cfg.databases.checkv}")
-
-    genomad_tsv = _find_genomad_tsv(cfg, sample_id)
-    tax_map     = _load_genomad_taxonomy(genomad_tsv)
-    if not tax_map:
+    # Auto-discover metadata from viral_id step if not provided
+    if metadata_tsv is None:
+        metadata_tsv = cfg.results("04_viral_id") / f"{sample_id}_metadata.tsv"
+    if not Path(metadata_tsv).exists():
         log_warn(
-            "  geNomad taxonomy not loaded -- co-binning disabled. "
-            "Run viral-id before quality."
+            f"  viral_id metadata not found at {metadata_tsv}. "
+            "Topology and genetic_code will use CheckV/defaults."
         )
+        metadata_tsv = None
 
-    qfile = checkv_dir / "quality_summary.tsv"
+    # Check if annotation_ready already has outputs (for idempotency)
+    existing = list(ann_phages.glob("*.fasta"))
+    if existing and not force:
+        log_info(
+            f"  {len(existing)} candidate(s) already in annotation_ready — "
+            "skipping  (--force to re-run)"
+        )
+        return ann_phages, drafts_dir
 
-    summary:       dict               = {}
-    hq_records:    list[ContigRecord] = []
-    draft_records: list[ContigRecord] = []
-    promoted_bins: list[ContigRecord] = []
-    hq_fastas:     list[Path]         = []
+    # Clear output dirs if re-running
+    if force:
+        for d in [ann_phages, ann_prov, drafts_dir]:
+            shutil.rmtree(d, ignore_errors=True)
+            d.mkdir(parents=True, exist_ok=True)
+
+    db = cfg.databases.checkv
+    if not db or not Path(db).exists():
+        log_error(
+            "  CheckV database not found. "
+            "Set databases.checkv in config.yaml or run: "
+            "checkv download_database databases/checkv_db"
+        )
+        raise FileNotFoundError(f"CheckV database not found: {db}")
+
+    require_tools(*TOOLS)
+    active_warnings: list[str] = []
 
     with Progress(
         SpinnerColumn(spinner_name="dots2"),
@@ -217,1039 +235,1067 @@ def run(
         console=console,
         transient=True,
     ) as progress:
-        task = progress.add_task("Initializing...", total=4)
+        task = progress.add_task("Initializing...", total=6)
 
-        # 1/4 -- CheckV
-        progress.update(task, description="[1/4] CheckV   -- end-to-end assessment")
-        _run_checkv(cfg, sample_id, virus_fna, checkv_dir, rpt_dir, force)
+        # ── Step 1: CheckV ────────────────────────────────────────────────────
+        progress.update(task, description="[1/6] CheckV  — completeness + quality assessment")
+        _run_checkv(virus_fna, checkv_dir, Path(db), cfg.threads, log_f, force)
         progress.advance(task)
 
-        # 2/4 -- Tier selection + rescue
-        progress.update(task, description="[2/4] CheckV   -- tier selection + rescue")
-        if qfile.exists():
-            seqs      = _load_fasta(virus_fna)
-            prov_seqs = _load_provirus_seqs(checkv_dir / "proviruses.fna")
-            summary, hq_records, draft_records = _parse_checkv(
-                sample_id, qfile, seqs, prov_seqs, cfg.checkv,
-            )
-            promoted_bins, draft_records = _cobin_draft_rescue(
-                draft_records, tax_map, sample_id,
-                cfg.checkv.min_bin_rescue_bp,
-            )
-            summary["rescued_draft_bins"] = len(promoted_bins)
-            _write_fasta_records(
-                draft_records, draft_dir / f"{sample_id}_draft.fasta",
-            )
-            log_ok("  [CheckV] genome selection complete")
-        else:
-            log_warn(
-                "  [CheckV] quality_summary.tsv not found -- "
-                f"check reports/{STEP}/{sample_id}_checkv.log"
-            )
+        # ── Step 2: Load results + assign tiers ───────────────────────────────
+        progress.update(task, description="[2/6] Parsing quality results + assigning tiers")
+        checkv_rows = _load_checkv_results(checkv_dir)
+        metadata    = _load_metadata(metadata_tsv) if metadata_tsv else {}
+        seqs        = _load_fasta(virus_fna)
+
+        contigs     = _assign_tiers(checkv_rows, metadata, cfg)
+        _warn_special_cases(contigs, active_warnings, cfg)
+        _warn_naming_level_redundancy(contigs, active_warnings)
         progress.advance(task)
 
-        # 3/4 -- Dereplication (mash for all sizes; cd-hit-est fallback)
-        progress.update(
-            task,
-            description="[3/4] dedup    -- mash all-size (circular-safe)",
+        # ── Step 3: Dereplication ─────────────────────────────────────────────
+        progress.update(task, description="[3/6] Dereplicating annotation_ready candidates")
+        contigs = _dereplicate(contigs, seqs, cfg.threads, active_warnings)
+        progress.advance(task)
+
+        # ── Step 4: Co-bin LQ drafts by taxon ─────────────────────────────────
+        progress.update(task, description="[4/6] Co-binning draft contigs by taxonomy")
+        contigs = _cobin_drafts(contigs, cfg.checkv.min_bin_rescue_bp)
+        progress.advance(task)
+
+        # ── Step 5: Write FASTAs + rename_map ─────────────────────────────────
+        progress.update(task, description="[5/6] Writing candidate FASTAs + rename_map")
+        stats = _write_outputs(
+            contigs, seqs, ann_phages, ann_prov, drafts_dir,
+            rpt_dir, sample_id,
         )
-        if hq_records:
-            hq_records, n_before, n_after = _dereplicate(
-                hq_records, tmp_dir, sample_id, rpt_dir, cfg.threads, force,
-            )
-            log_ok(
-                f"  [dedup] {n_before} -> {n_after} single-contig genomes  "
-                f"(-{n_before - n_after} redundant)"
-            )
-        hq_records.extend(promoted_bins)
-        if promoted_bins:
-            log_ok(f"  [draft rescue] {len(promoted_bins)} bin(s) promoted")
         progress.advance(task)
 
-        # 4/4 -- MQ co-bin + rename + seqkit
-        progress.update(task, description="[4/4] seqkit   -- co-binning, renaming & formatting")
-        if hq_records:
-            hq_records = _cobin_by_taxon(hq_records, tax_map, sample_id)
-            rename_map = _build_rename_map(hq_records, tax_map)
-            _save_rename_map(rename_map, rpt_dir / f"{sample_id}_rename_map.tsv")
-            hq_fastas = _write_candidates(
-                hq_records, rename_map, phage_dir, prov_dir, tmp_dir,
-                rpt_dir / f"{sample_id}_seqkit.log",
-            )
-            n_multi = sum(1 for r in hq_records if r.is_multicontig)
-            n_phage = sum(1 for r in hq_records if not r.is_provirus)
-            n_prov  = sum(1 for r in hq_records if r.is_provirus)
-            log_ok(
-                f"  [seqkit] {len(hq_fastas)} file(s) -> {sample_id}/annotation_ready/  "
-                f"(phage={n_phage}  provirus={n_prov}  multi-contig={n_multi})"
-            )
+        # ── Step 6: Read recruitment + coverage validation ────────────────────
+        progress.update(task, description="[6/6] Read recruitment — coverage validation")
+        coverage = _read_recruitment_coverage(
+            list(ann_phages.glob("*.fasta")),
+            sample_id, cfg, rpt_dir, log_f, active_warnings,
+        )
+        # Annotate rename_map with coverage metrics if available
+        if coverage:
+            _annotate_rename_map_coverage(rpt_dir / "rename_map.tsv", coverage)
         progress.advance(task)
 
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    _validate_output(sample_id, hq_fastas, draft_records)
-    _print_summary_table(sample_id, summary, hq_fastas, draft_records)
-    _check_warnings(summary, cfg.checkv.min_completeness)
-    if summary:
-        _save_tsv(summary, rpt_dir / "checkv_summary.tsv")
+    _save_tsv({**stats, "sample": sample_id}, rpt_dir / "quality_summary.tsv")
     _print_completion_panel(
-        sample_id, sample_dir, phage_dir, prov_dir, draft_dir, checkv_dir, rpt_dir,
-        summary, hq_fastas, draft_records,
+        sample_id, ann_phages, drafts_dir, rpt_dir, stats, active_warnings,
     )
-
-    log_step(f"Module 05 completed v  [{sample_id}]")
-    log_info("Next: phageflow annotate --sample-id <id> --genome <candidate.fasta>")
-    return hq_fastas
+    log_step(f"Module 05 completed ✓  [{sample_id}]")
+    return ann_phages, drafts_dir
 
 
-# -- Step 1: CheckV ------------------------------------------------------------
+# ── CheckV ────────────────────────────────────────────────────────────────────
 
-def _run_checkv(cfg, sample_id, virus_fna, sdir, rpt_dir, force):
-    qfile = sdir / "quality_summary.tsv"
-    if qfile.exists() and qfile.stat().st_size > 0 and not force:
-        log_info("  [CheckV] already processed -- skipping  (--force to re-run)")
+def _run_checkv(
+    virus_fna: Path, checkv_dir: Path, db: Path,
+    threads: int, log_f: Path, force: bool,
+) -> None:
+    """Run CheckV end_to_end.
+
+    CheckV estimates genome completeness via:
+    1. AAI alignment against a curated viral genome database
+    2. HMM-based gene content (lower bound for novel viruses)
+    Nayfach et al. 2021, Nat Biotechnol 39:578.
+    """
+    summary = checkv_dir / "quality_summary.tsv"
+    if summary.exists() and not force:
+        log_info("  [CheckV] output already exists — skipping")
         return
-    mkdirs(sdir)
-    try:
-        run_silent([
+    run_silent(
+        [
             "checkv", "end_to_end",
-            str(virus_fna), str(sdir),
-            "-d", str(cfg.databases.checkv),
-            "-t", str(cfg.threads),
+            str(virus_fna),
+            str(checkv_dir),
+            "-d", str(db),
+            "-t", str(threads),
             "--remove_tmp",
-        ], log_file=rpt_dir / f"{sample_id}_checkv.log")
-        log_ok("  [CheckV] assessment complete")
-    except Exception as e:
-        log_warn(f"  [CheckV] warning: {e}")
+        ],
+        log_file=log_f,
+    )
+    log_ok("  [CheckV] quality assessment complete")
 
 
-# -- Step 2: Tier selection + rescue -------------------------------------------
-
-def _parse_checkv(sample_id, qfile, seqs, prov_seqs, chkv):
-    tiers: dict[str, int] = {t: 0 for t in _TIER_ORDER}
-    rescued_lq = rescued_nd = rescued_nd_density = rescued_large_nd = 0
-    total_viral_genes = total_host_genes = 0
-    best_len = 0
-    best_completeness = 0.0
-    best_quality_tier = ""
-    max_contamination = 0.0
-    hq_records:    list[ContigRecord] = []
-    draft_records: list[ContigRecord] = []
-
-    try:
-        with open(qfile) as f:
-            header = f.readline().strip().split("\t")
-            col    = {h: i for i, h in enumerate(header)}
-
-            for line in f:
-                row = line.strip().split("\t")
-                if not row or len(row) < 3:
-                    continue
-
-                cid      = _col(row, col, "contig_id",      0)
-                clen_s   = _col(row, col, "contig_length",  1)
-                qual     = _col(row, col, "checkv_quality", 7)
-                comp_s   = _col(row, col, "completeness",   9)
-                contm_s  = _col(row, col, "contamination", 10)
-                vgn_s    = _col(row, col, "viral_genes",    4)
-                hgn_s    = _col(row, col, "host_genes",     5)
-                prov_col = _col(row, col, "provirus",        2)
-
-                is_provirus = (
-                    prov_col.strip().lower() == "yes"
-                    or "|provirus" in cid.lower()
-                )
-
-                clen_int = int(clen_s or 0)
-                vgn_int  = int(vgn_s  or 0)
-
-                if clen_int < chkv.min_contig_bp:
-                    log_info(
-                        f"  [filter] {cid} discarded -- "
-                        f"{clen_int}bp < min_contig_bp {chkv.min_contig_bp}bp"
-                    )
-                    continue
-
-                gene_density = vgn_int / (clen_int / 1000) if clen_int > 0 else 0.0
-                tiers[qual if qual in tiers else "Not-determined"] += 1
-
-                try:   total_viral_genes += vgn_int
-                except (ValueError, TypeError): pass
-                try:   total_host_genes  += int(hgn_s)
-                except (ValueError, TypeError): pass
-                try:   max_contamination = max(max_contamination, float(contm_s))
-                except (ValueError, TypeError): pass
-
-                is_nd = qual == "Not-determined" or comp_s in ("", "NA", "N/A")
-                try:
-                    comp_val = 0.0 if is_nd else float(comp_s)
-                except (ValueError, TypeError):
-                    comp_val = 0.0
-                    is_nd = True
-                comp_str = "ND" if is_nd else f"{comp_val:.1f}"
-
-                if clen_int > best_len:
-                    best_len          = clen_int
-                    best_completeness = comp_val
-                    best_quality_tier = qual
-
-                seq = seqs.get(cid, "")
-                if is_provirus and cid in prov_seqs:
-                    seq = prov_seqs[cid]
-                if not seq:
-                    continue
-
-                record = ContigRecord(
-                    contig_id        = cid,
-                    sequence         = seq,
-                    length_bp        = clen_int,
-                    completeness     = comp_val,
-                    completeness_str = comp_str,
-                    quality_tier     = qual,
-                    is_provirus      = is_provirus,
-                    viral_genes      = vgn_int,
-                )
-
-                if qual in ("Complete", "High-quality"):
-                    hq_records.append(record)
-                elif qual == "Medium-quality":
-                    if comp_val >= chkv.min_completeness:
-                        hq_records.append(record)
-                    else:
-                        draft_records.append(record)
-                elif qual == "Low-quality":
-                    if vgn_int >= chkv.min_viral_genes or gene_density >= chkv.min_gene_density:
-                        log_warn(
-                            f"  [LQ rescue] {cid} -- "
-                            f"{vgn_int} viral gene(s), "
-                            f"density={gene_density:.2f}/kb -> drafts/"
-                        )
-                        draft_records.append(record)
-                        rescued_lq += 1
-                elif qual == "Not-determined":
-                    if clen_int >= chkv.large_nd_rescue_bp and vgn_int >= 1:
-                        log_warn(
-                            f"  [large-ND rescue] {cid} -- "
-                            f"{clen_int:,}bp, {vgn_int} gene(s) -> annotation_ready/"
-                        )
-                        hq_records.append(record)
-                        rescued_large_nd += 1
-                    elif clen_int >= chkv.length_rescue and vgn_int >= 1:
-                        log_warn(
-                            f"  [ND rescue] {cid} -- "
-                            f"{clen_int:,}bp, {vgn_int} gene(s) -> drafts/"
-                        )
-                        draft_records.append(record)
-                        rescued_nd += 1
-                    elif gene_density >= chkv.min_gene_density:
-                        log_warn(
-                            f"  [density-ND rescue] {cid} -- "
-                            f"density={gene_density:.2f}/kb -> drafts/"
-                        )
-                        draft_records.append(record)
-                        rescued_nd_density += 1
-
-    except Exception as e:
-        log_warn(f"  [CheckV] could not parse {qfile}: {e}")
-
-    rescued_total = rescued_lq + rescued_nd + rescued_nd_density + rescued_large_nd
-    if rescued_total:
-        log_ok(
-            f"  [rescue] LQ={rescued_lq}  ND-moderate={rescued_nd}  "
-            f"ND-density={rescued_nd_density}  ND-large->HQ={rescued_large_nd}"
+def _load_checkv_results(checkv_dir: Path) -> list[dict]:
+    """Load CheckV quality_summary.tsv."""
+    summary = checkv_dir / "quality_summary.tsv"
+    if not summary.exists():
+        raise FileNotFoundError(
+            f"CheckV quality_summary.tsv not found in {checkv_dir}."
         )
-
-    return {
-        "sample":             sample_id,
-        "complete":           tiers.get("Complete",       0),
-        "hq":                 tiers.get("High-quality",   0),
-        "mq":                 tiers.get("Medium-quality", 0),
-        "lq":                 tiers.get("Low-quality",    0),
-        "nd":                 tiers.get("Not-determined", 0),
-        "rescued_lq":         rescued_lq,
-        "rescued_nd":         rescued_nd,
-        "rescued_nd_density": rescued_nd_density,
-        "rescued_large_nd":   rescued_large_nd,
-        "rescued_draft_bins": 0,
-        "hq_promoted":        len(hq_records),
-        "draft_saved":        len(draft_records),
-        "best_length_bp":     best_len,
-        "best_completeness":  best_completeness,
-        "best_quality_tier":  best_quality_tier,
-        "total_viral_genes":  total_viral_genes,
-        "total_host_genes":   total_host_genes,
-        "max_contamination":  round(max_contamination, 2),
-    }, hq_records, draft_records
+    rows = []
+    with open(summary, newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            rows.append(dict(row))
+    return rows
 
 
-# -- Draft co-bin rescue -------------------------------------------------------
+def _load_metadata(path: Path) -> dict:
+    """Load viral_id metadata TSV as {seq_name: {topology, genetic_code, ...}}."""
+    meta = {}
+    if not path or not Path(path).exists():
+        return meta
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            meta[row["seq_name"]] = dict(row)
+    return meta
 
-def _cobin_draft_rescue(draft_records, tax_map, sample_id, min_bin_rescue_bp):
-    taxon_buckets: dict[str, list[ContigRecord]] = defaultdict(list)
-    no_taxon:      list[ContigRecord]             = []
 
-    for rec in draft_records:
-        taxon = tax_map.get(rec.contig_id)
-        if not taxon:
-            log_info(
-                f"  [draft-bin] {rec.contig_id}: no taxonomy -> "
-                "individual draft (Camargo et al. 2023)"
-            )
-            no_taxon.append(rec)
+def _load_fasta(path: Path) -> dict[str, str]:
+    """Load FASTA into {seq_id: sequence} dict."""
+    seqs: dict[str, str] = {}
+    current_id = ""
+    parts: list[str] = []
+    with open(path) as f:
+        for line in f:
+            if line.startswith(">"):
+                if current_id:
+                    seqs[current_id] = "".join(parts)
+                current_id = line[1:].split()[0].strip()
+                parts = []
+            else:
+                parts.append(line.rstrip())
+        if current_id:
+            seqs[current_id] = "".join(parts)
+    return seqs
+
+
+# ── Tier assignment ───────────────────────────────────────────────────────────
+
+def _assign_tiers(
+    checkv_rows: list[dict],
+    metadata:    dict,
+    cfg:         Config,
+) -> dict:
+    """Assign quality tier to each contig.
+
+    Returns {seq_name: info_dict} with tier, topology, genetic_code, etc.
+    """
+    result: dict = {}
+
+    for row in checkv_rows:
+        seq_name = row.get("contig_id", "").strip()
+        if not seq_name:
             continue
-        taxon_buckets[taxon].append(rec)
 
-    promoted:  list[ContigRecord] = []
-    remaining: list[ContigRecord] = list(no_taxon)
+        # Numeric fields with safe defaults
+        def _int(key, default=0):
+            v = row.get(key, "") or ""
+            try: return int(float(v))
+            except (ValueError, TypeError): return default
 
-    for taxon, records in taxon_buckets.items():
-        total_len = sum(r.length_bp for r in records)
-        total_vgn = sum(r.viral_genes for r in records)
-        if len(records) >= 2 and total_len >= min_bin_rescue_bp:
-            log_warn(
-                f"  [draft-bin rescue] {taxon}: {len(records)} contigs, "
-                f"{total_len:,}bp, {total_vgn} viral genes "
-                f"-> annotation_ready/"
-            )
-            bin_id = "__bin__" + "||".join(r.contig_id for r in records)
-            promoted.append(ContigRecord(
-                contig_id        = bin_id,
-                sequence         = "",
-                length_bp        = total_len,
-                completeness     = max(r.completeness for r in records),
-                completeness_str = "ND-bin",
-                quality_tier     = _best_quality_tier(r.quality_tier for r in records),
-                is_provirus      = any(r.is_provirus for r in records),
-                viral_genes      = total_vgn,
-                is_multicontig   = True,
-                sub_records      = records,
-            ))
+        def _float(key, default=0.0):
+            v = row.get(key, "") or ""
+            try: return float(v)
+            except (ValueError, TypeError): return default
+
+        length           = _int("contig_length")
+        viral_genes      = _int("viral_genes")
+        host_genes       = _int("host_genes")
+        completeness     = _float("completeness")
+        kmer_freq        = _float("kmer_freq")
+        genome_copies    = _float("genome_copies")
+        checkv_quality   = (row.get("checkv_quality") or "").strip()
+        termini_type     = (row.get("termini_type")   or "").strip()
+        comp_method      = (row.get("completeness_method") or "").strip()
+        warnings_str     = (row.get("warnings")       or "").strip()
+
+        # Topology: CheckV (confirmed in sequence) > geNomad (predicted)
+        meta = metadata.get(seq_name, {})
+        if termini_type == "DTR":
+            topology = "DTR"
+        elif termini_type == "ITR":
+            topology = "ITR"
         else:
-            remaining.extend(records)
+            # geNomad topology as fallback context
+            genomad_topo = meta.get("topology", "") or ""
+            topology = genomad_topo if genomad_topo else "No terminal repeats"
 
-    return promoted, remaining
+        genetic_code = int(meta.get("genetic_code", 11) or 11)
+        naming_level = (meta.get("naming_level") or "Phage").strip() or "Phage"
+        virus_score  = _float_safe(meta.get("virus_score", "0"))
 
-
-# -- Step 3: Dereplication (mash for all sizes; cd-hit-est fallback) -----------
-
-def _dereplicate(
-    records: list[ContigRecord],
-    tmp_dir: Path,
-    sample_id: str,
-    rpt_dir: Path,
-    threads: int,
-    force: bool,
-) -> tuple[list[ContigRecord], int, int]:
-    """
-    Dereplicate HQ single-contig genomes.
-
-    Strategy (in priority order):
-    1. mash (all sizes) — preferred when mash is in PATH.
-       mash computes distances from k-mer composition (MinHash sketches),
-       which is invariant to sequence orientation and starting position.
-       This correctly handles circular phage genomes whose linearizations
-       by SPAdes and MEGAHIT begin at different positions (circular
-       permutations). cd-hit-est cannot detect these because individual
-       HSPs each cover only a fraction of the sequence.
-       Reference: Ondov et al. (2016) Genome Biology 17:132.
-
-    2. cd-hit-est (fallback when mash not in PATH) — split by size:
-       < _LARGE_CONTIG_BP (50 kb): standard parameters.
-       >= _LARGE_CONTIG_BP: wider alignment band (-band 500).
-       Both at 98% ANI (Turner et al. 2021, Arch Virol 166:2633).
-       WARNING: cd-hit-est will miss circular permutations.
-
-    Both target distance < 0.02 = ANI > 98%, above the ICTV species
-    boundary of 95%, to remove assembly duplicates while preserving
-    biological strain diversity.
-    """
-    n_before = len(records)
-    if n_before <= 1:
-        return records, n_before, n_before
-
-    import shutil as _sh
-    if _sh.which("mash"):
-        log_info(
-            "  [dedup] using mash for all sizes (circular permutation-safe)"
-        )
-        result = _mash_dereplicate(records, tmp_dir, sample_id, rpt_dir)
-    else:
-        log_warn(
-            "  [dedup] mash not found -- falling back to cd-hit-est. "
-            "Circular permutations (e.g. Inoviridae) may NOT be deduplicated. "
-            "Install mash: mamba install -n phageflow bioconda::mash"
-        )
-        small = [r for r in records if r.length_bp <  _LARGE_CONTIG_BP]
-        large = [r for r in records if r.length_bp >= _LARGE_CONTIG_BP]
-        result = (
-            _cdhit_dereplicate(small, tmp_dir, sample_id, rpt_dir, threads)
-            if len(small) > 1 else small
-        ) + (
-            _cdhit_dereplicate_large(large, tmp_dir, sample_id, rpt_dir, threads)
-            if len(large) > 1 else large
-        )
-
-    return result, n_before, len(result)
-
-
-def _cdhit_dereplicate(
-    records: list[ContigRecord],
-    tmp_dir: Path,
-    sample_id: str,
-    rpt_dir: Path,
-    threads: int,
-) -> list[ContigRecord]:
-    """cd-hit-est dereplication for contigs < 50kb (fallback only)."""
-    if len(records) <= 1:
-        return records
-
-    tmp_in  = tmp_dir / f"{sample_id}_small_raw.fasta"
-    tmp_out = tmp_dir / f"{sample_id}_small_derep.fasta"
-    _write_fasta_records(records, tmp_in)
-
-    try:
-        run_silent([
-            "cd-hit-est",
-            "-i",  str(tmp_in), "-o", str(tmp_out),
-            "-c",  _CDHIT_ID, "-aS", _CDHIT_AS,
-            "-G",  "0", "-n", _CDHIT_N, "-d", "0",
-            "-sc", "1", "-T", str(threads), "-M", "4000",
-        ], log_file=rpt_dir / f"{sample_id}_cdhit_small.log")
-    except Exception as e:
-        log_warn(f"  [cd-hit-est] small contig dedup warning: {e}")
-        return records
-    finally:
-        Path(str(tmp_out) + ".clstr").unlink(missing_ok=True)
-
-    rep_ids = set(_load_fasta(tmp_out).keys())
-    return [r for r in records if r.contig_id in rep_ids]
-
-
-def _cdhit_dereplicate_large(
-    records: list[ContigRecord],
-    tmp_dir: Path,
-    sample_id: str,
-    rpt_dir: Path,
-    threads: int,
-) -> list[ContigRecord]:
-    """cd-hit-est dereplication for contigs >= 50kb (fallback only, wider band)."""
-    if len(records) <= 1:
-        return records
-
-    tmp_in  = tmp_dir / f"{sample_id}_large_raw.fasta"
-    tmp_out = tmp_dir / f"{sample_id}_large_derep.fasta"
-    _write_fasta_records(records, tmp_in)
-
-    try:
-        run_silent([
-            "cd-hit-est",
-            "-i", str(tmp_in), "-o", str(tmp_out),
-            "-c", _CDHIT_ID, "-aS", _CDHIT_AS,
-            "-G", "0", "-n", _CDHIT_N, "-d", "0",
-            "-sc", "1", "-T", str(threads), "-M", "8000",
-            "-band", "500",   # wider band for large sequences
-        ], log_file=rpt_dir / f"{sample_id}_cdhit_large.log")
-    except Exception as e:
-        log_warn(f"  [cd-hit-est] large contig dedup warning: {e}")
-        return records
-    finally:
-        Path(str(tmp_out) + ".clstr").unlink(missing_ok=True)
-
-    rep_ids = set(_load_fasta(tmp_out).keys())
-    return [r for r in records if r.contig_id in rep_ids]
-
-
-def _mash_dereplicate(
-    records: list[ContigRecord],
-    tmp_dir: Path,
-    sample_id: str,
-    rpt_dir: Path,
-) -> list[ContigRecord]:
-    """
-    mash-based dereplication for ALL contig sizes.
-
-    mash sketch -i sketches each sequence from the multi-FASTA independently.
-    mash dist sketch.msh sketch.msh gives all pairwise distances.
-    Union-Find clusters sequences with distance < _MASH_ANI_THRESH (0.02 = ANI > 98%);
-    the longest representative is kept from each cluster.
-
-    Why mash for all sizes (including small phages like Inoviridae ~6 kb):
-        mash distance = 1 - Jaccard(k-mer sets), computed from MinHash sketches.
-        k-mer composition is invariant to the starting position of a circular
-        sequence linearization. Two SPAdes/MEGAHIT assemblies of the same
-        circular phage genome linearized at different positions share all k-mers
-        (ignoring assembly artifacts), yielding distance ≈ 0.
-        cd-hit-est uses linear alignment and fails for circular permutations:
-        each HSP covers only a fraction of the sequence, failing -aS thresholds.
-
-    Reference: Ondov et al. (2016) Genome Biology 17:132.
-    """
-    if len(records) <= 1:
-        return records
-
-    combined  = tmp_dir / f"{sample_id}_all.fasta"
-    sketch_pf = tmp_dir / f"{sample_id}_all"     # mash appends .msh
-    sketch    = Path(str(sketch_pf) + ".msh")
-
-    _write_fasta_records(records, combined)
-
-    try:
-        run_silent(
-            ["mash", "sketch", "-i",
-             "-s", _MASH_SKETCH_SIZE,
-             "-o", str(sketch_pf),
-             str(combined)],
-            log_file=rpt_dir / f"{sample_id}_mash.log",
-        )
-    except Exception as e:
-        log_warn(
-            f"  [mash sketch] warning: {e} -- "
-            "falling back to cd-hit-est (circular permutations may not be caught)"
-        )
-        return records
-
-    try:
-        result = subprocess.run(
-            ["mash", "dist", str(sketch), str(sketch)],
-            capture_output=True, text=True, check=False,
-        )
-        dist_output = result.stdout
-    except Exception as e:
-        log_warn(f"  [mash dist] warning: {e} -- skipping dereplication")
-        return records
-
-    # Union-Find clustering
-    id_to_record = {r.contig_id: r for r in records}
-    parent: dict[str, str] = {r.contig_id: r.contig_id for r in records}
-
-    def _find(x: str) -> str:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def _union(x: str, y: str) -> None:
-        px, py = _find(x), _find(y)
-        if px == py:
-            return
-        # Keep the longer sequence as cluster root
-        if id_to_record[px].length_bp >= id_to_record[py].length_bp:
-            parent[py] = px
+        # ── Tier assignment (priority order) ──────────────────────────────────
+        if checkv_quality == _CKV_COMPLETE:
+            tier = _TIER_COMPLETE
+        elif checkv_quality == _CKV_HQ or completeness >= 90.0:
+            tier = _TIER_HQ
+        elif checkv_quality == _CKV_MQ or (
+            completeness >= cfg.checkv.min_completeness and completeness > 0
+        ):
+            tier = _TIER_MQ
+        elif (
+            checkv_quality in (_CKV_ND, _CKV_LQ, "")
+            and length >= cfg.checkv.large_nd_rescue_bp
+            and viral_genes >= 1
+        ):
+            # Large ND rescue: captures jumbo phages without CheckV references
+            tier = _TIER_LARGE_ND
+        elif (
+            length >= cfg.checkv.min_contig_bp
+            and length >= cfg.checkv.length_rescue
+            and viral_genes >= cfg.checkv.min_viral_genes
+        ):
+            tier = _TIER_LQ_DRAFT
         else:
-            parent[px] = py
+            tier = _TIER_DISCARD
 
-    n_pairs = 0
-    for line in dist_output.splitlines():
-        parts = line.strip().split("\t")
-        if len(parts) < 3:
-            continue
-        # mash output: ref_path query_path distance p-value shared/total
-        # seq name is the last whitespace-separated token in the path field
-        ref = parts[0].split()[-1]
-        qry = parts[1].split()[-1]
-        try:
-            dist = float(parts[2])
-        except (ValueError, IndexError):
-            continue
-        if ref == qry:
-            continue
-        if ref in parent and qry in parent and dist < _MASH_ANI_THRESH:
-            _union(ref, qry)
-            n_pairs += 1
-
-    if n_pairs:
-        log_info(
-            f"  [mash] {n_pairs} near-identical pair(s) found "
-            f"(dist < {_MASH_ANI_THRESH}, ANI > {(1 - _MASH_ANI_THRESH)*100:.0f}%)"
-        )
-
-    representatives = {_find(r.contig_id) for r in records}
-    return [r for r in records if r.contig_id in representatives]
-
-
-# -- Step 4a: MQ co-binning ----------------------------------------------------
-
-def _cobin_by_taxon(records, tax_map, sample_id):
-    already_multi     = [r for r in records if r.is_multicontig]
-    singles           = [r for r in records if not r.is_multicontig]
-    high_conf_singles = [r for r in singles if r.quality_tier in _HIGH_CONFIDENCE_TIERS]
-    mq_singles        = [r for r in singles if r.quality_tier not in _HIGH_CONFIDENCE_TIERS]
-
-    taxon_buckets: dict[str, list[ContigRecord]] = defaultdict(list)
-    no_taxon: list[ContigRecord] = []
-
-    for rec in mq_singles:
-        taxon = tax_map.get(rec.contig_id)
-        if not taxon:
-            no_taxon.append(rec)
-            continue
-        taxon_buckets[taxon].append(rec)
-
-    result = list(already_multi) + list(high_conf_singles) + list(no_taxon)
-
-    if high_conf_singles:
-        log_info(
-            f"  [co-bin] {len(high_conf_singles)} Complete/HQ kept as "
-            "individual candidates (Turner et al. 2021: 95% ANI species boundary)"
-        )
-
-    for taxon, recs in taxon_buckets.items():
-        if len(recs) == 1:
-            result.append(recs[0])
-        else:
-            total_len = sum(r.length_bp for r in recs)
-            total_vgn = sum(r.viral_genes for r in recs)
-            log_info(
-                f"  [co-bin] {taxon}: {len(recs)} MQ contigs "
-                f"({total_len:,}bp) -> multi-contig candidate"
-            )
-            bin_id = "__bin__" + "||".join(r.contig_id for r in recs)
-            result.append(ContigRecord(
-                contig_id        = bin_id,
-                sequence         = "",
-                length_bp        = total_len,
-                completeness     = max(r.completeness for r in recs),
-                completeness_str = f"{max(r.completeness for r in recs):.1f}",
-                quality_tier     = _best_quality_tier(r.quality_tier for r in recs),
-                is_provirus      = any(r.is_provirus for r in recs),
-                viral_genes      = total_vgn,
-                is_multicontig   = True,
-                sub_records      = recs,
-            ))
+        result[seq_name] = {
+            "tier":               tier,
+            "topology":           topology,
+            "genetic_code":       genetic_code,
+            "naming_level":       naming_level,
+            "virus_score":        virus_score,
+            "checkv_quality":     checkv_quality,
+            "completeness":       completeness,
+            "completeness_method": comp_method,
+            "contig_length":      length,
+            "viral_genes":        viral_genes,
+            "host_genes":         host_genes,
+            "kmer_freq":          kmer_freq,
+            "genome_copies":      genome_copies,
+            "termini_type":       termini_type,
+            "checkv_warnings":    warnings_str,
+            # candidate_id assigned later
+            "candidate_id":       "",
+        }
 
     return result
 
 
-# -- Step 4b: Rename + write ---------------------------------------------------
+def _float_safe(val) -> float:
+    try: return float(val)
+    except (ValueError, TypeError): return 0.0
 
-def _build_rename_map(records, tax_map):
-    counters:   dict[str, int] = defaultdict(int)
-    rename_map: list[dict]     = []
 
-    for rec in records:
-        if rec.is_multicontig:
-            taxon    = (tax_map.get(rec.sub_records[0].contig_id) or "Unknown"
-                        if rec.sub_records else "Unknown")
-            n_ctg    = len(rec.sub_records)
-            orig_ids = ",".join(r.contig_id for r in rec.sub_records)
-        else:
-            taxon    = tax_map.get(rec.contig_id) or "Unknown"
-            n_ctg    = 1
-            orig_ids = rec.contig_id
+# ── Special case warnings ─────────────────────────────────────────────────────
 
-        counters[taxon] += 1
-        new_id = f"{taxon}_candidate_{counters[taxon]:03d}"
+def _warn_special_cases(
+    contigs: dict, active_warnings: list[str], cfg: Config,
+) -> None:
+    """WARN on concatemers and host gene contamination. Never discard."""
+    n_concat = 0
+    n_host   = 0
+    for seq, info in contigs.items():
+        if info["tier"] == _TIER_DISCARD:
+            continue
+        kmer_freq     = info["kmer_freq"]
+        genome_copies = info["genome_copies"]
+        host_genes    = info["host_genes"]
+        if (kmer_freq > cfg.checkv.max_kmer_freq or
+                genome_copies > cfg.checkv.max_genome_copies):
+            n_concat += 1
+        if host_genes > 0:
+            n_host += 1
 
-        log_info(
-            f"  [rename] {orig_ids[:60]} -> {new_id}  "
-            f"({taxon}, {n_ctg} contig(s), {rec.completeness_str})"
+    if n_concat:
+        msg = (
+            f"{n_concat} contig(s) have kmer_freq>{cfg.checkv.max_kmer_freq} "
+            f"or genome_copies>{cfg.checkv.max_genome_copies} — probable "
+            "concatemer(s). Sequence is valid; contig may represent multiple "
+            "linked genome copies. NOT discarded."
         )
-        rename_map.append({
-            "new_id":       new_id,
-            "original_id":  orig_ids,
-            "taxon":        taxon,
-            "length_bp":    rec.length_bp,
-            "completeness": rec.completeness_str,
-            "quality_tier": rec.quality_tier,
-            "is_provirus":  rec.is_provirus,
-            "n_contigs":    n_ctg,
-        })
-
-    return rename_map
-
-
-def _write_candidates(records, rename_map, phage_dir, prov_dir, tmp_dir, log_file):
-    written: list[Path] = []
-    for rec, mapping in zip(records, rename_map):
-        target_dir = prov_dir if rec.is_provirus else phage_dir
-        out_fasta  = target_dir / f"{mapping['new_id']}.fasta"
-        tmp_fasta  = tmp_dir    / f"{mapping['new_id']}_raw.tmp"
-        new_id     = mapping["new_id"]
-
-        if rec.is_multicontig:
-            pairs = [
-                (f"{new_id}_ctg{i + 1:03d}", r.sequence)
-                for i, r in enumerate(rec.sub_records)
-                if r.sequence
-            ]
-        else:
-            pairs = [(new_id, rec.sequence)]
-
-        _write_fasta_pairs(pairs, tmp_fasta)
-        _format_seqkit(tmp_fasta, out_fasta, log_file)
-        tmp_fasta.unlink(missing_ok=True)
-        written.append(out_fasta)
-
-    return written
-
-
-# -- Taxonomy helpers ----------------------------------------------------------
-
-def _find_genomad_tsv(cfg: Config, sample_id: str) -> Path:
-    """
-    Locate geNomad virus_summary.tsv.
-    Primary: read genomad_tax_tsv from viral-id's genomad_summary.tsv.
-    Fallback: convention-based path.
-    """
-    genomad_rpt = cfg.reports("04_viral_id") / "genomad_summary.tsv"
-    if genomad_rpt.exists():
-        try:
-            with open(genomad_rpt) as f:
-                header = f.readline().strip().split("\t")
-                col    = {h: i for i, h in enumerate(header)}
-                if "genomad_tax_tsv" in col:
-                    idx = col["genomad_tax_tsv"]
-                    for line in f:
-                        parts = line.strip().split("\t")
-                        if parts and parts[0] == sample_id and idx < len(parts):
-                            tsv_path = Path(parts[idx])
-                            if tsv_path.exists():
-                                return tsv_path
-                            log_info(
-                                f"  [taxonomy] reported path not found: "
-                                f"{tsv_path} -- trying fallback"
-                            )
-        except Exception as e:
-            log_info(f"  [taxonomy] could not read genomad_summary.tsv: {e}")
-
-    prefix   = f"{sample_id}_contigs_nr"
-    fallback = (
-        cfg.results("04_viral_id")
-        / sample_id
-        / f"{prefix}_summary"
-        / f"{prefix}_virus_summary.tsv"
-    )
-    if not fallback.exists():
-        log_warn(
-            f"  [taxonomy] geNomad TSV not found at {fallback}. "
-            "Co-binning disabled. Run viral-id before quality."
+        log_warn(f"  {msg}")
+        active_warnings.append(msg)
+    if n_host:
+        msg = (
+            f"{n_host} contig(s) have host_genes > 0 — possible residual "
+            "host contamination. Inspect contamination.tsv. NOT discarded."
         )
-    return fallback
+        log_warn(f"  {msg}")
+        active_warnings.append(msg)
 
 
-def _load_genomad_taxonomy(tsv: Path) -> dict[str, str | None]:
-    tax_map: dict[str, str | None] = {}
-    if not tsv or not tsv.exists():
-        return tax_map
-    try:
-        with open(tsv) as f:
-            raw_header = f.readline().strip()
-            if not raw_header:
-                return tax_map
-            header  = raw_header.split("\t")
-            col     = {h: i for i, h in enumerate(header)}
-            id_col  = next(
-                (c for c in ("seq_name", "contig_id", "sequence_name") if c in col),
-                None,
-            )
-            if id_col is None:
-                log_warn(
-                    f"  [taxonomy] no ID column in {tsv.name} "
-                    f"({header[:6]}). Co-binning disabled."
-                )
-                return tax_map
-            id_idx  = col[id_col]
-            tax_idx = col.get("taxonomy", -1)
+# ── Dereplication ─────────────────────────────────────────────────────────────
 
-            for line in f:
-                if not line.strip():
-                    continue
-                parts = line.strip().split("\t")
-                if id_idx >= len(parts):
-                    continue
-                cid   = parts[id_idx].split("|")[0].strip()
-                taxon: str | None = None
-                if 0 <= tax_idx < len(parts):
-                    raw = parts[tax_idx].strip()
-                    if raw.upper() not in ("NA", "N/A", ""):
-                        levels = [
-                            lvl.strip() for lvl in raw.split(";")
-                            if lvl.strip()
-                            and "unclassified" not in lvl.strip().lower()
-                        ]
-                        if levels:
-                            taxon = (
-                                levels[-1]
-                                .replace(" ", "_").replace("/", "_")
-                                .replace("\\", "_").replace(":", "")
-                                .replace(";", "")
-                            )
-                tax_map[cid] = taxon
+def _dereplicate(
+    contigs: dict,
+    seqs:    dict[str, str],
+    threads: int,
+    active_warnings: list[str],
+) -> dict:
+    """Dereplicate annotation_ready single-contig candidates at 98% ANI.
 
-    except Exception as e:
-        log_warn(f"  [taxonomy] could not parse {tsv}: {e}")
+    Operates on single-contig annotation_ready contigs only.
+    Multi-contig bins and drafts are not dereplicated.
 
-    n_classified = sum(1 for v in tax_map.values() if v)
-    log_ok(
-        f"  [taxonomy] {len(tax_map)} contigs, "
-        f"{n_classified} with family-level classification"
-    )
-    return tax_map
+    Method: mash distance (sketch size 10,000, ANI > 98% = dist < 0.02).
+    Keeps the longest contig in each cluster.
+    Fallback: cd-hit-est at 98% if mash is not available.
 
-
-def _load_provirus_seqs(prov_fna: Path) -> dict[str, str]:
-    if not prov_fna.exists():
-        return {}
-    seqs = _load_fasta(prov_fna)
-    if seqs:
-        log_info(f"  [CheckV] {len(seqs)} provirus sequence(s) loaded")
-    return seqs
-
-
-def _best_quality_tier(tiers) -> str:
-    tier_list = list(tiers)
-    for t in _TIER_ORDER:
-        if t in tier_list:
-            return t
-    return tier_list[0] if tier_list else "Not-determined"
-
-
-# -- FASTA I/O -----------------------------------------------------------------
-
-def _load_fasta(path: Path) -> dict[str, str]:
-    seqs: dict[str, str] = {}
-    hdr = seq = ""
-    with open(path) as f:
-        for line in f:
-            line = line.rstrip()
-            if line.startswith(">"):
-                if hdr:
-                    seqs[hdr] = seq
-                hdr = line[1:].split()[0]
-                seq = ""
-            else:
-                seq += line
-    if hdr:
-        seqs[hdr] = seq
-    return seqs
-
-
-def _write_fasta_records(records: list[ContigRecord], out_path: Path) -> None:
-    with open(out_path, "w") as f:
-        for rec in records:
-            if rec.sequence and not rec.is_multicontig:
-                f.write(f">{rec.contig_id}\n{rec.sequence}\n")
-
-
-def _write_fasta_pairs(pairs: list[tuple[str, str]], out_path: Path) -> None:
-    with open(out_path, "w") as f:
-        for hdr, seq in pairs:
-            if seq:
-                f.write(f">{hdr}\n{seq}\n")
-
-
-def _col(row: list, col: dict, name: str, fallback: int) -> str:
-    idx = col.get(name, fallback)
-    return row[idx] if idx < len(row) else ""
-
-
-def _format_seqkit(in_fasta: Path, out_fasta: Path, log_f: Path) -> None:
-    log_f.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(out_fasta, "w") as fout, open(log_f, "a") as ferr:
-            result = subprocess.run(
-                ["seqkit", "seq", "-w", "60", str(in_fasta)],
-                stdout=fout, stderr=ferr,
-            )
-        if result.returncode != 0:
-            log_warn("  [seqkit] non-zero exit -- copying without line-wrap")
-            shutil.copy(in_fasta, out_fasta)
-    except Exception as e:
-        log_warn(f"  [seqkit] warning: {e} -- copying without line-wrap")
-        shutil.copy(in_fasta, out_fasta)
-
-
-def _save_rename_map(rename_map: list[dict], path: Path) -> None:
-    headers = [
-        "new_id", "original_id", "taxon", "length_bp",
-        "completeness", "quality_tier", "n_contigs",
+    Turner et al. 2021, Arch Virol 166:2633 — 95% ANI = ICTV species boundary.
+    """
+    singles = [
+        seq for seq, info in contigs.items()
+        if info["tier"] in _ANNOTATION_TIERS
     ]
-    with open(path, "w") as f:
-        f.write("\t".join(headers) + "\n")
-        for row in rename_map:
-            f.write("\t".join(str(row.get(h, "")) for h in headers) + "\n")
+    if len(singles) < 2:
+        return contigs   # nothing to dereplicate
 
-
-# -- Validation ----------------------------------------------------------------
-
-def _validate_output(
-    sample_id: str,
-    hq_fastas: list[Path],
-    draft_records: list[ContigRecord],
-) -> None:
-    if hq_fastas:
-        log_ok(f"  validate . {len(hq_fastas)} HQ genome(s) annotation-ready -- OK")
-    elif draft_records:
-        log_warn(
-            f"  validate . 0 HQ genomes -- {len(draft_records)} draft(s) saved. "
-            "Lower checkv.min_completeness or check min_bin_rescue_bp."
+    # Safety guard: dereplication is designed for a handful of HQ candidates
+    # from a purified prep, not for hundreds of short assembly fragments.
+    # If there are many candidates, likely a fragmented assembly — skip
+    # dereplication to avoid O(N²) mash cost and confusing results.
+    # The assembly/host-removal step should be revisited in this case.
+    if len(singles) > 200:
+        msg = (
+            f"{len(singles)} annotation_ready candidates — too many for "
+            "pairwise dereplication (expected <20 for purified phage prep). "
+            "Likely a fragmented assembly. Dereplication skipped; "
+            "review host-removal mode and assembly quality."
         )
-    else:
-        log_warn(
-            f"  validate . 0 genomes passed quality filters for {sample_id}. "
-            "Check geNomad output (Module 04) and assembly contiguity."
+        log_warn(f"  [derep] {msg}")
+        active_warnings.append(msg)
+        return contigs
+
+    # Split by genome size: mash is unreliable on small genomes (<20 kb)
+    # because the k-mer sketch undersamples the sequence space.
+    # minimap2 asm5 performs actual sequence alignment and is accurate at any size.
+    large = [s for s in singles if contigs[s]["contig_length"] >= _SMALL_GENOME_THRESH]
+    small = [s for s in singles if contigs[s]["contig_length"] <  _SMALL_GENOME_THRESH]
+
+    clusters: list[list] = []
+    has_mash    = bool(shutil.which("mash"))
+    has_minimap = bool(shutil.which("minimap2"))
+
+    if len(large) >= 2:
+        if has_mash:
+            clusters += _cluster_mash(large, seqs, threads)
+        else:
+            log_warn("  [derep] mash not found — using cd-hit-est for large genomes.")
+            active_warnings.append("mash not found; used cd-hit-est for large-genome dereplication")
+            clusters += _cluster_cdhit(large, seqs, threads)
+
+    if len(small) >= 2:
+        if has_minimap:
+            log_info(
+                f"  [derep] {len(small)} small genome(s) (<{_SMALL_GENOME_THRESH//1000} kb) "
+                "— using minimap2 asm5 (mash unreliable at this size)"
+            )
+            clusters += _cluster_minimap2(small, seqs, threads)
+        else:
+            log_warn("  [derep] minimap2 not found — using cd-hit-est for small genomes.")
+            active_warnings.append("minimap2 not found; used cd-hit-est for small-genome dereplication")
+            clusters += _cluster_cdhit(small, seqs, threads)
+
+    n_before = len(singles)
+    n_removed = 0
+    for cluster in clusters:
+        if len(cluster) < 2:
+            continue
+        keep = max(cluster, key=lambda s: contigs[s]["contig_length"])
+        for seq in cluster:
+            if seq != keep:
+                contigs[seq]["tier"] = _TIER_DEREP
+                n_removed += 1
+
+    if n_removed:
+        log_info(
+            f"  [derep] {n_before} → {n_before - n_removed} candidates "
+            f"({n_removed} removed at ANI>{1 - _MASH_DIST_THRESH:.0%})"
+        )
+    return contigs
+
+
+class _UnionFind:
+    def __init__(self, ids):
+        self.parent = {i: i for i in ids}
+
+    def find(self, x):
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, x, y):
+        px, py = self.find(x), self.find(y)
+        if px != py:
+            self.parent[px] = py
+
+    def groups(self) -> list[list]:
+        g: dict[str, list] = defaultdict(list)
+        for x in self.parent:
+            g[self.find(x)].append(x)
+        return list(g.values())
+
+
+def _cluster_mash(singles: list, seqs: dict, threads: int) -> list[list]:
+    """Cluster sequences using mash at MASH_DIST_THRESH."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        # Write individual FASTAs for mash -i (per-sequence sketch)
+        fasta_combined = tmp / "candidates.fasta"
+        with open(fasta_combined, "w") as f:
+            for seq in singles:
+                if seq in seqs:
+                    f.write(f">{seq}\n{seqs[seq]}\n")
+
+        # mash sketch -o PREFIX always appends .msh → final file = PREFIX.msh
+        # Pass prefix WITHOUT .msh so the output lands at sketch.msh, not sketch.msh.msh
+        sketch_prefix = tmp / "sketch"
+        sketch_file   = tmp / "sketch.msh"
+        subprocess.run(
+            ["mash", "sketch", "-s", "10000", "-i",
+             "-o", str(sketch_prefix), str(fasta_combined)],
+            capture_output=True, check=True, timeout=120,
+        )
+        if not sketch_file.exists():
+            raise FileNotFoundError(
+                f"mash sketch did not produce {sketch_file}. "
+                "Check that mash is installed and the input FASTA is valid."
+            )
+        dist_out = tmp / "distances.tsv"
+        subprocess.run(
+            ["mash", "dist", "-p", str(min(threads, 8)),
+             str(sketch_file), str(sketch_file)],
+            stdout=open(dist_out, "w"), capture_output=False,
+            check=True, timeout=300,
         )
 
+        uf = _UnionFind(singles)
+        with open(dist_out) as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) < 3:
+                    continue
+                ref, qry = parts[0], parts[1]
+                try:
+                    dist = float(parts[2])
+                except ValueError:
+                    continue
+                # Extract seq ID from mash output (may include path)
+                ref_id = Path(ref).stem
+                qry_id = Path(qry).stem
+                if ref_id in singles and qry_id in singles and dist < _MASH_DIST_THRESH:
+                    uf.union(ref_id, qry_id)
 
-# -- Rich display helpers -------------------------------------------------------
-
-def _color_completeness(val: float) -> str:
-    s = f"{val:.1f}%"
-    if val >= _COMPLETENESS_GOOD: return f"[bold green]{s}[/bold green]"
-    if val >= _COMPLETENESS_WARN: return f"[bold yellow]{s}[/bold yellow]"
-    return f"[bold red]{s}[/bold red]"
-
-
-def _color_contamination(val: float) -> str:
-    s = f"{val:.1f}%"
-    if val == 0.0:          return f"[bold green]{s}[/bold green]"
-    if val <= _CONTAM_WARN: return f"[bold yellow]{s}[/bold yellow]"
-    return f"[bold red]{s}[/bold red]"
-
-
-def _fmt(val, unit: str = "") -> str:
-    if val in ("N/A", "", None):
-        return "[dim]N/A[/dim]"
-    return f"{val}{unit}"
+    return uf.groups()
 
 
-def _print_input_table(sample_id: str, virus_fna: Path, stats: dict) -> None:
-    log_info(f"  Virus FASTA : {virus_fna}  ({human_size(virus_fna)})")
-    log_info(
-        f"  Input       : {stats['n']} contig(s) | "
-        f"total={stats['total_bp']:,}bp | largest={stats['largest_bp']:,}bp | "
-        f"N50={stats['n50']:,}bp"
-    )
+def _cluster_minimap2(singles: list, seqs: dict, threads: int) -> list[list]:
+    """Dereplicate small genomes (<20 kb) using minimap2 all-vs-all alignment.
+
+    mash is unreliable for genomes below ~15–20 kb because the 10,000-hash
+    sketch over-samples the entire k-mer space, producing inaccurate distance
+    estimates. minimap2 asm5 performs actual sequence alignment and is accurate
+    at any genome size, including circular ssDNA phages (Inoviridae, Microviridae)
+    and small tailed phages.
+
+    Two genomes are considered the same if:
+      identity ≥ 95%  AND  max(coverage_query, coverage_target) ≥ 80%
+
+    The coverage criterion handles cases where one genome is longer due to
+    assembly artifacts at the termini — as long as 80% of one genome aligns
+    to the other at high identity, they are the same phage.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        fasta = tmp / "small.fasta"
+        with open(fasta, "w") as f:
+            for seq in singles:
+                if seq in seqs:
+                    f.write(f">{seq}\n{seqs[seq]}\n")
+
+        paf = tmp / "alignments.paf"
+        # asm5: accurate alignment for assemblies with <5% divergence.
+        # -c: output CIGAR string (needed for accurate match count).
+        result = subprocess.run(
+            ["minimap2", "-c", "-x", "asm5",
+             "-t", str(min(threads, 8)),
+             str(fasta), str(fasta)],
+            stdout=open(paf, "w"),
+            stderr=subprocess.DEVNULL,
+            timeout=180,
+        )
+        if result.returncode != 0 or not paf.exists():
+            log_warn("  [derep] minimap2 failed — falling back to cd-hit-est for small genomes")
+            return _cluster_cdhit(singles, seqs, threads)
+
+        uf = _UnionFind(singles)
+        with open(paf) as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) < 11:
+                    continue
+                try:
+                    qname  = parts[0]; qlen = int(parts[1])
+                    qstart = int(parts[2]); qend = int(parts[3])
+                    tname  = parts[5]; tlen = int(parts[6])
+                    tstart = int(parts[7]); tend = int(parts[8])
+                    matches   = int(parts[9])
+                    block_len = int(parts[10])
+                except (ValueError, IndexError):
+                    continue
+
+                if qname == tname or block_len == 0:
+                    continue
+
+                identity = matches / block_len
+                cov_q    = (qend - qstart) / qlen if qlen else 0
+                cov_t    = (tend - tstart) / tlen if tlen else 0
+
+                if identity >= 0.95 and max(cov_q, cov_t) >= 0.80:
+                    if qname in singles and tname in singles:
+                        uf.union(qname, tname)
+
+        return uf.groups()
 
 
-def _print_summary_table(sample_id, summary, hq_fastas, draft_records):
-    if not summary:
-        return
+def _cluster_cdhit(singles: list, seqs: dict, threads: int) -> list[list]:
+    """Fallback: cd-hit-est at 98% for dereplication."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        inp = tmp / "input.fasta"
+        out = tmp / "nr"
+        with open(inp, "w") as f:
+            for seq in singles:
+                if seq in seqs:
+                    f.write(f">{seq}\n{seqs[seq]}\n")
+        subprocess.run(
+            ["cd-hit-est", "-i", str(inp), "-o", str(out),
+             "-c", "0.98", "-aS", "0.85", "-n", "8",
+             "-T", str(threads), "-M", "0", "-d", "0"],
+            capture_output=True, check=False, timeout=300,
+        )
+        clstr = Path(str(out) + ".clstr")
+        if not clstr.exists():
+            return [[s] for s in singles]
+
+        clusters: list[list] = []
+        current: list[str] = []
+        with open(clstr) as f:
+            for line in f:
+                if line.startswith(">Cluster"):
+                    if current:
+                        clusters.append(current)
+                    current = []
+                else:
+                    # Extract seq ID: ">seq_id..."
+                    parts = line.strip().split(">")
+                    if len(parts) > 1:
+                        seq_id = parts[1].split("...")[0].strip()
+                        if seq_id in singles:
+                            current.append(seq_id)
+        if current:
+            clusters.append(current)
+        return clusters or [[s] for s in singles]
+
+
+# ── Co-binning ────────────────────────────────────────────────────────────────
+
+def _cobin_drafts(contigs: dict, min_bin_bp: int) -> dict:
+    """Co-bin LQ draft contigs of the same naming_level.
+
+    Groups lq-draft contigs by naming_level. If combined length ≥ min_bin_bp,
+    upgrades all contigs in the group to bin-rescue (annotation_ready).
+    Otherwise they remain as lq-draft (→ drafts/).
+
+    Contigs with naming_level = 'Phage' (unclassified) are co-binned together
+    only if all drafts are unclassified; this prevents merging genuinely
+    distinct phages that share the 'Phage' label due to absent taxonomy.
+    """
+    drafts = {
+        seq: info for seq, info in contigs.items()
+        if info["tier"] == _TIER_LQ_DRAFT
+    }
+    if not drafts:
+        return contigs
+
+    # Naming levels that already have annotation_ready singles.
+    # Bin-rescue is suppressed for these: the LQ drafts are redundant
+    # fragments of the same genome, not a distinct new candidate.
+    already_annotated = {
+        info["naming_level"]
+        for info in contigs.values()
+        if info["tier"] in _ANNOTATION_TIERS
+    }
+
+    # Group by naming_level
+    groups: dict[str, list[str]] = defaultdict(list)
+    for seq, info in drafts.items():
+        groups[info["naming_level"]].append(seq)
+
+    for naming_level, members in groups.items():
+        if naming_level in already_annotated:
+            log_info(
+                f"  [co-bin] {naming_level}: annotation_ready single(s) exist "
+                f"— {len(members)} LQ draft(s) kept as drafts (likely redundant fragments)"
+            )
+            continue
+        combined_len = sum(contigs[m]["contig_length"] for m in members)
+        if combined_len >= min_bin_bp:
+            for m in members:
+                contigs[m]["tier"] = _TIER_BIN
+            log_info(
+                f"  [co-bin] {naming_level}: {len(members)} contig(s) "
+                f"→ bin-rescue ({combined_len:,} bp combined)"
+            )
+
+    return contigs
+
+
+# ── Write outputs ─────────────────────────────────────────────────────────────
+
+def _write_outputs(
+    contigs:    dict,
+    seqs:       dict[str, str],
+    ann_phages: Path,
+    ann_prov:   Path,
+    drafts_dir: Path,
+    rpt_dir:    Path,
+    sample_id:  str,
+) -> dict:
+    """Assign candidate IDs, write FASTAs, write rename_map.tsv."""
+
+    counters: dict[str, int] = defaultdict(int)
+
+    def _next_id(naming_level: str, suffix: str) -> str:
+        counters[f"{naming_level}_{suffix}"] += 1
+        n = counters[f"{naming_level}_{suffix}"]
+        return f"{naming_level}_{suffix}_{n:03d}"
+
+    # ── Assign candidate IDs ──────────────────────────────────────────────────
+
+    # Annotation-ready singles (complete, HQ, MQ, large-ND)
+    # Sorted: complete first, then by completeness desc, then by length desc
+    def _sort_key(item):
+        tier_order = {
+            _TIER_COMPLETE: 0, _TIER_HQ: 1, _TIER_MQ: 2, _TIER_LARGE_ND: 3,
+        }
+        return (tier_order.get(item[1]["tier"], 99),
+                -item[1]["completeness"], -item[1]["contig_length"])
+
+    for seq, info in sorted(contigs.items(), key=_sort_key):
+        if info["tier"] in _ANNOTATION_TIERS:
+            info["candidate_id"] = _next_id(info["naming_level"], "candidate")
+
+    # Bin-rescue (multi-contig): one candidate_id per naming_level group
+    bin_groups: dict[str, list[str]] = defaultdict(list)
+    for seq, info in contigs.items():
+        if info["tier"] == _TIER_BIN:
+            bin_groups[info["naming_level"]].append(seq)
+
+    for naming_level, members in bin_groups.items():
+        cand_id = _next_id(naming_level, "candidate")
+        for m in members:
+            contigs[m]["candidate_id"] = cand_id
+
+    # Drafts
+    for seq, info in contigs.items():
+        if info["tier"] == _TIER_LQ_DRAFT:
+            info["candidate_id"] = _next_id(info["naming_level"], "draft")
+
+    # ── Write FASTAs ──────────────────────────────────────────────────────────
+
+    # Single-contig annotation_ready
+    for seq, info in contigs.items():
+        if info["tier"] not in _ANNOTATION_TIERS:
+            continue
+        cand_id = info["candidate_id"]
+        fasta   = ann_phages / f"{cand_id}.fasta"
+        seq_str = seqs.get(seq, "")
+        if not seq_str:
+            continue
+        with open(fasta, "w") as f:
+            # Rename header to candidate_id for clean downstream tools
+            f.write(
+                f">{cand_id}  "
+                f"[original={seq}]  "
+                f"[length={info['contig_length']}]  "
+                f"[completeness={info['completeness']:.1f}%]  "
+                f"[topology={info['topology']}]  "
+                f"[checkv={info['checkv_quality']}]\n"
+            )
+            # 60-char line wrap
+            for i in range(0, len(seq_str), 60):
+                f.write(seq_str[i:i+60] + "\n")
+
+    # Bin-rescue (multi-contig): all members in one FASTA, original headers
+    written_bins: set[str] = set()
+    for naming_level, members in bin_groups.items():
+        cand_id = contigs[members[0]]["candidate_id"]
+        if cand_id in written_bins:
+            continue
+        written_bins.add(cand_id)
+        fasta = ann_phages / f"{cand_id}.fasta"
+        with open(fasta, "w") as f:
+            for m in members:
+                seq_str = seqs.get(m, "")
+                if seq_str:
+                    f.write(f">{m}  [candidate={cand_id}]\n")
+                    for i in range(0, len(seq_str), 60):
+                        f.write(seq_str[i:i+60] + "\n")
+
+    # Drafts (single-contig per draft)
+    for seq, info in contigs.items():
+        if info["tier"] != _TIER_LQ_DRAFT:
+            continue
+        cand_id = info["candidate_id"]
+        fasta   = drafts_dir / f"{cand_id}.fasta"
+        seq_str = seqs.get(seq, "")
+        if not seq_str:
+            continue
+        with open(fasta, "w") as f:
+            f.write(f">{cand_id}  [original={seq}]  [length={info['contig_length']}]\n")
+            for i in range(0, len(seq_str), 60):
+                f.write(seq_str[i:i+60] + "\n")
+
+    # ── Write rename_map.tsv ──────────────────────────────────────────────────
+    _write_rename_map(contigs, rpt_dir / "rename_map.tsv")
+
+    # ── Compute stats ─────────────────────────────────────────────────────────
+    tier_counts = Counter(info["tier"] for info in contigs.values())
+    n_ann  = tier_counts.get(_TIER_COMPLETE, 0) + tier_counts.get(_TIER_HQ, 0) + \
+             tier_counts.get(_TIER_MQ, 0) + tier_counts.get(_TIER_LARGE_ND, 0)
+    n_bin  = len(written_bins)
+    n_draft = tier_counts.get(_TIER_LQ_DRAFT, 0)
+    n_derep = tier_counts.get(_TIER_DEREP, 0)
+    n_disc  = tier_counts.get(_TIER_DISCARD, 0)
+    n_candidates = len(list(ann_phages.glob("*.fasta")))
+
     log_ok(
-        f"  Tiers    : Complete={summary.get('complete', 0)}  "
-        f"HQ={summary.get('hq', 0)}  MQ={summary.get('mq', 0)}  "
-        f"LQ={summary.get('lq', 0)}  ND={summary.get('nd', 0)}"
-    )
-    rescued = sum(summary.get(k, 0) for k in (
-        "rescued_lq", "rescued_nd", "rescued_nd_density",
-        "rescued_large_nd", "rescued_draft_bins",
-    ))
-    if rescued:
-        log_ok(
-            f"  Rescued  : LQ={summary.get('rescued_lq', 0)}  "
-            f"ND-mod={summary.get('rescued_nd', 0)}  "
-            f"ND-dens={summary.get('rescued_nd_density', 0)}  "
-            f"ND-large->HQ={summary.get('rescued_large_nd', 0)}  "
-            f"draft-bins={summary.get('rescued_draft_bins', 0)}"
-        )
-    log_ok(
-        f"  Selected : {len(hq_fastas)} -> annotation_ready/  |  "
-        f"{len(draft_records)} -> drafts/"
-    )
-    log_ok(
-        f"  Best     : {summary.get('best_length_bp', 0):,}bp  |  "
-        f"completeness={_color_completeness(summary.get('best_completeness', 0.0))}  |  "
-        f"{_fmt(summary.get('best_quality_tier', ''))}"
-    )
-    log_ok(
-        f"  Genes    : viral={_fmt(summary.get('total_viral_genes', 0))}  "
-        f"host={_fmt(summary.get('total_host_genes', 0))}  |  "
-        f"max contamination="
-        f"{_color_contamination(summary.get('max_contamination', 0.0))}"
+        f"  [quality] {n_candidates} candidate(s) → annotation_ready  "
+        f"[complete={tier_counts.get(_TIER_COMPLETE,0)}  "
+        f"HQ={tier_counts.get(_TIER_HQ,0)}  "
+        f"MQ={tier_counts.get(_TIER_MQ,0)}  "
+        f"large-ND={tier_counts.get(_TIER_LARGE_ND,0)}  "
+        f"bin={n_bin}]"
     )
 
-
-def _check_warnings(summary: dict, min_completeness: float) -> None:
-    if not summary:
-        return
-    if summary.get("hq_promoted", 0) == 0 and summary.get("draft_saved", 0) > 0:
-        log_warn(
-            f"  No genomes at {min_completeness}% threshold -- "
-            f"{summary['draft_saved']} draft(s) saved. "
-            "Lower checkv.min_completeness or check min_bin_rescue_bp."
-        )
-    elif summary.get("hq_promoted", 0) == 0 and not summary.get("rescued_draft_bins", 0):
-        log_warn("  No genomes passed quality filters -- check geNomad output.")
-    if 0 < summary.get("best_completeness", 0.0) < _COMPLETENESS_WARN:
-        log_warn(
-            f"  Best completeness {summary['best_completeness']:.1f}% "
-            f"< {_COMPLETENESS_WARN}% -- fragmented genome."
-        )
-    if summary.get("total_host_genes", 0) > _HOST_GENE_WARN:
-        log_warn(
-            f"  {summary['total_host_genes']} host gene(s) -- "
-            "possible contamination. Check Module 02."
-        )
-    if summary.get("max_contamination", 0.0) > _CONTAM_WARN:
-        log_warn(
-            f"  Max contamination {summary['max_contamination']:.1f}% "
-            f"> {_CONTAM_WARN}% -- inspect quality_summary.tsv."
-        )
+    return {
+        "n_input":       str(len(contigs)),
+        "n_candidates":  str(n_candidates),
+        "n_complete":    str(tier_counts.get(_TIER_COMPLETE,  0)),
+        "n_hq":          str(tier_counts.get(_TIER_HQ,        0)),
+        "n_mq":          str(tier_counts.get(_TIER_MQ,        0)),
+        "n_large_nd":    str(tier_counts.get(_TIER_LARGE_ND,  0)),
+        "n_bin":         str(n_bin),
+        "n_draft":       str(n_draft),
+        "n_dereplicated": str(n_derep),
+        "n_discarded":   str(n_disc),
+    }
 
 
-def _print_completion_panel(
-    sample_id, sample_dir, phage_dir, prov_dir, draft_dir, checkv_dir, rpt_dir,
-    summary, hq_fastas, draft_records,
-) -> None:
-    text = Text()
-    text.append("v ", style="bold green")
-    text.append(
-        f"Complete={summary.get('complete', 0)}  HQ={summary.get('hq', 0)}  "
-        f"MQ={summary.get('mq', 0)}  LQ={summary.get('lq', 0)}  "
-        f"ND={summary.get('nd', 0)}  ->  ",
-        style="dim white",
-    )
-    text.append(f"{len(hq_fastas)}", style="bold green")
-    text.append(" genome(s) annotation-ready\n\n", style="cyan")
-    text.append("Sample dir : ", style="dim white")
-    text.append(str(sample_dir) + "\n", style="white")
-    if hq_fastas:
-        text.append("Phages     : ", style="dim white")
-        text.append(str(phage_dir) + "\n", style="white")
-        text.append("Proviruses : ", style="dim white")
-        text.append(str(prov_dir) + "\n", style="white")
-        text.append("Rename map : ", style="dim white")
-        text.append(str(rpt_dir / f"{sample_id}_rename_map.tsv") + "\n", style="white")
-    if draft_records:
-        text.append("Drafts     : ", style="dim white")
-        text.append(str(draft_dir / f"{sample_id}_draft.fasta") + "\n", style="white")
-    text.append("CheckV     : ", style="dim white")
-    text.append(str(checkv_dir / "quality_summary.tsv") + "\n", style="white")
-    text.append("Summary    : ", style="dim white")
-    text.append(str(rpt_dir / "checkv_summary.tsv"), style="white")
+# ── Rename map ────────────────────────────────────────────────────────────────
 
-    console.print(Panel(
-        text,
-        title=f"[bold cyan]Quality complete -- {sample_id}[/bold cyan]",
-        border_style="cyan",
-        padding=(0, 2),
-        width=90,
-    ))
-
-
-# -- TSV summary ---------------------------------------------------------------
-
-_TSV_HEADERS = [
-    "sample",
-    "complete", "hq", "mq", "lq", "nd",
-    "rescued_lq", "rescued_nd", "rescued_nd_density", "rescued_large_nd",
-    "rescued_draft_bins", "hq_promoted", "draft_saved",
-    "best_length_bp", "best_completeness", "best_quality_tier",
-    "total_viral_genes", "total_host_genes", "max_contamination",
+_RENAME_HEADERS = [
+    "seq_name", "candidate_id", "tier",
+    "topology", "genetic_code", "naming_level",
+    "checkv_quality", "completeness", "completeness_method",
+    "contig_length", "viral_genes", "host_genes",
+    "kmer_freq", "genome_copies", "termini_type", "checkv_warnings",
 ]
 
 
-def _save_tsv(summary: dict, path: Path) -> None:
+def _write_rename_map(contigs: dict, path: Path) -> None:
+    """Write rename_map.tsv — the critical metadata link to annotate.py.
+
+    Contains all per-contig metadata needed downstream:
+      topology     → annotate.py: circular/linear plot, dnaapler decision
+      genetic_code → annotate.py: Pharokka --genetic_code
+      naming_level → quality naming, co-binning context
+      candidate_id → the output FASTA filename (without .fasta)
+      tier         → which output directory the candidate went to
+    """
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_RENAME_HEADERS, delimiter="\t",
+                                extrasaction="ignore")
+        writer.writeheader()
+        for seq, info in sorted(contigs.items()):
+            writer.writerow({
+                "seq_name":          seq,
+                "candidate_id":      info.get("candidate_id", ""),
+                "tier":              info["tier"],
+                "topology":          info["topology"],
+                "genetic_code":      info["genetic_code"],
+                "naming_level":      info["naming_level"],
+                "checkv_quality":    info["checkv_quality"],
+                "completeness":      f"{info['completeness']:.2f}",
+                "completeness_method": info.get("completeness_method", ""),
+                "contig_length":     info["contig_length"],
+                "viral_genes":       info["viral_genes"],
+                "host_genes":        info["host_genes"],
+                "kmer_freq":         f"{info['kmer_freq']:.3f}",
+                "genome_copies":     f"{info['genome_copies']:.3f}",
+                "termini_type":      info["termini_type"],
+                "checkv_warnings":   info.get("checkv_warnings", ""),
+            })
+
+
+# ── Redundancy warning ───────────────────────────────────────────────────────
+
+def _warn_naming_level_redundancy(contigs: dict, active_warnings: list[str]) -> None:
+    """Warn when multiple candidates of the same naming_level look redundant.
+
+    If the combined length of all annotation_ready candidates in a naming_level
+    exceeds 1.5× the length of the longest single candidate, the candidates
+    are likely overlapping fragments of the same genome rather than distinct
+    phages. This is a diagnostic warning — no candidates are discarded.
+
+    Root cause: mash distance between non-overlapping fragments of the same
+    large genome appears high (k-mer content is disjoint), so pairwise ANI
+    dereplication does not cluster them. The redundancy manifests as multiple
+    candidates from the same family representing the same phage genome.
+    """
+    groups: dict[str, list] = defaultdict(list)
+    for seq, info in contigs.items():
+        if info["tier"] in _ANNOTATION_TIERS or info["tier"] == _TIER_BIN:
+            groups[info["naming_level"]].append(info["contig_length"])
+
+    for naming_level, lengths in groups.items():
+        if len(lengths) < 2:
+            continue
+        total   = sum(lengths)
+        largest = max(lengths)
+        if total > 1.5 * largest:
+            msg = (
+                f"{naming_level}: {len(lengths)} candidate(s), combined "
+                f"{total:,} bp ({total / largest:.1f}× largest). "
+                "Possible redundant fragments of the same genome — "
+                "dereplication could not cluster non-overlapping contig pairs. "
+                "Review annotation_ready candidates and select the most complete."
+            )
+            log_warn(f"  [redundancy] {msg}")
+            active_warnings.append(msg)
+
+
+# ── Completion panel ──────────────────────────────────────────────────────────
+
+def _print_completion_panel(
+    sample_id:  str,
+    ann_phages: Path,
+    drafts_dir: Path,
+    rpt_dir:    Path,
+    stats:      dict,
+    active_warnings: list[str],
+) -> None:
+    def _f(key) -> str:
+        v = str(stats.get(key, "0"))
+        return v if v else "0"
+
+    candidates = list(ann_phages.glob("*.fasta"))
+
+    lines = [
+        "[bold]Quality summary[/bold]",
+        f"  [cyan]Input contigs     :[/cyan] {_f('n_input')}",
+        f"  [cyan]Candidates        :[/cyan] [bold green]{_f('n_candidates')}[/bold green]"
+        f"  [dim](complete={_f('n_complete')}  HQ={_f('n_hq')}  "
+        f"MQ={_f('n_mq')}  large-ND={_f('n_large_nd')}  bin={_f('n_bin')})[/dim]",
+        f"  [cyan]Drafts            :[/cyan] {_f('n_draft')}",
+        f"  [cyan]Dereplicated      :[/cyan] {_f('n_dereplicated')}",
+        f"  [cyan]Discarded         :[/cyan] {_f('n_discarded')}",
+    ]
+
+    if candidates:
+        lines += ["", "[bold]Annotation-ready candidates[/bold]"]
+        for fa in sorted(candidates):
+            lines.append(f"  [green]✓[/green] {fa.stem}")
+
+    lines += [
+        "",
+        "[bold]Output directories[/bold]",
+        f"  annotation_ready/ : {ann_phages}",
+        f"  drafts/           : {drafts_dir}",
+        f"  rename_map.tsv    : {rpt_dir / 'rename_map.tsv'}",
+    ]
+
+    if active_warnings:
+        lines += ["", "[bold yellow]Warnings[/bold yellow]"]
+        lines += [f"  [yellow]⚠ {w}[/yellow]" for w in active_warnings]
+
+    console.print(Panel(
+        "\n".join(lines),
+        title=f"[bold cyan]Quality complete — {sample_id}[/bold cyan]",
+        border_style="cyan", padding=(0, 2), width=90,
+    ))
+
+
+# ── Read recruitment + coverage ──────────────────────────────────────────────
+
+def _read_recruitment_coverage(
+    candidates:      list,
+    sample_id:       str,
+    cfg,
+    rpt_dir:         Path,
+    log_f:           Path,
+    active_warnings: list[str],
+) -> dict:
+    """Map post-host-removal reads to annotation_ready candidates.
+
+    Computes per-candidate:
+      mean_depth : mean read depth across all positions
+      breadth    : fraction of positions covered at ≥1x
+      cv         : coefficient of variation of depth (std/mean)
+
+    Roux et al. 2019 (eLife 8:e42923) — read recruitment is the primary
+    validation of phage genome integrity.
+    Nayfach et al. 2021 (Nat Biotechnol 39:578) — read mapping for circular
+    contig confirmation.
+
+    Reads auto-discovered from results/02_host_removal/{sample_id}_R*.
+    Silently skipped if reads not found.
+    """
+    if not candidates:
+        return {}
+
+    r1 = cfg.results("02_host_removal") / f"{sample_id}_R1.fastq.gz"
+    r2 = cfg.results("02_host_removal") / f"{sample_id}_R2.fastq.gz"
+    if not r1.exists() or not r2.exists():
+        log_info(
+            f"  [coverage] reads not found at {r1.parent} — "
+            "coverage validation skipped"
+        )
+        return {}
+
+    cov_dir = rpt_dir / "coverage"
+    cov_dir.mkdir(parents=True, exist_ok=True)
+    combined  = cov_dir / "combined_candidates.fasta"
+    bam       = cov_dir / "reads_vs_candidates.bam"
+    depth_tsv = cov_dir / "depth.tsv"
+    threads   = cfg.threads
+
+    # Combined reference: use candidate_id as header for easy depth parsing
+    with open(combined, "w") as out:
+        for fa in candidates:
+            cand_id = fa.stem
+            seq_parts: list[str] = []
+            with open(fa) as f:
+                for line in f:
+                    if line.startswith(">"):
+                        if seq_parts:
+                            out.write("".join(seq_parts))
+                            out.write("\n")
+                        out.write(f">{cand_id}\n")
+                        seq_parts = []
+                    else:
+                        seq_parts.append(line.rstrip())
+            if seq_parts:
+                out.write("".join(seq_parts))
+                out.write("\n")
+
+    try:
+        run_silent(["bwa-mem2", "index", str(combined)], log_file=log_f)
+        run_silent(
+            f"bwa-mem2 mem -t {threads} {combined} {r1} {r2} "
+            f"| samtools sort -@ {min(threads, 8)} -o {bam}",
+            log_file=log_f, shell=True,
+        )
+        run_silent(["samtools", "index", str(bam)], log_file=log_f)
+        subprocess.run(
+            ["samtools", "depth", "-a", str(bam)],
+            stdout=open(depth_tsv, "w"),
+            stderr=subprocess.DEVNULL,
+            check=True, timeout=600,
+        )
+    except Exception as e:
+        log_warn(f"  [coverage] alignment failed: {e} — coverage validation skipped")
+        return {}
+
+    depths_by_cand: dict[str, list[int]] = defaultdict(list)
+    with open(depth_tsv) as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) < 3:
+                continue
+            try:
+                depths_by_cand[parts[0]].append(int(parts[2]))
+            except ValueError:
+                continue
+
+    results: dict[str, dict] = {}
+    for cand_id, depths in depths_by_cand.items():
+        if not depths:
+            continue
+        n        = len(depths)
+        mean_d   = sum(depths) / n
+        breadth  = sum(1 for d in depths if d >= 1) / n
+        variance = sum((d - mean_d) ** 2 for d in depths) / n
+        cv       = math.sqrt(variance) / mean_d if mean_d > 0 else 0.0
+
+        results[cand_id] = {
+            "mean_depth": f"{mean_d:.1f}",
+            "breadth":    f"{breadth:.4f}",
+            "cv":         f"{cv:.3f}",
+        }
+        log_info(
+            f"  [coverage] {cand_id}: "
+            f"depth={mean_d:.0f}x  breadth={breadth * 100:.1f}%  CV={cv:.2f}"
+        )
+        if breadth < 0.95:
+            msg = (
+                f"{cand_id}: breadth={breadth * 100:.1f}% (<95%) — "
+                "uncovered region(s). Possible assembly gap or chimera."
+            )
+            log_warn(f"  [coverage] {msg}")
+            active_warnings.append(msg)
+        elif cv > 1.5:
+            msg = (
+                f"{cand_id}: coverage CV={cv:.2f} (>1.5) — "
+                "uneven depth. Possible concatemer or chimeric assembly."
+            )
+            log_warn(f"  [coverage] {msg}")
+            active_warnings.append(msg)
+        else:
+            log_ok(f"  [coverage] {cand_id}: uniform coverage — genome integrity OK")
+
+    return results
+
+
+def _annotate_rename_map_coverage(rename_map: Path, coverage: dict) -> None:
+    """Add mean_depth, breadth, cv columns to existing rename_map.tsv."""
+    if not rename_map.exists() or not coverage:
+        return
+    with open(rename_map) as f:
+        lines = f.readlines()
+    if not lines:
+        return
+
+    headers = lines[0].rstrip("\n").split("\t")
+    if "mean_depth" not in headers:
+        headers += ["mean_depth", "breadth", "cv"]
+        lines[0] = "\t".join(headers) + "\n"
+
+    out_lines = [lines[0]]
+    for line in lines[1:]:
+        parts = line.rstrip("\n").split("\t")
+        row   = dict(zip(headers[:len(parts)], parts))
+        cand  = row.get("candidate_id", "")
+        cov   = coverage.get(cand, {})
+        row["mean_depth"] = cov.get("mean_depth", "")
+        row["breadth"]    = cov.get("breadth", "")
+        row["cv"]         = cov.get("cv", "")
+        out_lines.append("\t".join(row.get(h, "") for h in headers) + "\n")
+
+    with open(rename_map, "w") as f:
+        f.writelines(out_lines)
+
+# ── TSV summary ───────────────────────────────────────────────────────────────
+
+_TSV_HEADERS = [
+    "sample", "n_input", "n_candidates",
+    "n_complete", "n_hq", "n_mq", "n_large_nd", "n_bin",
+    "n_draft", "n_dereplicated", "n_discarded",
+]
+
+
+def _save_tsv(row: dict, path: Path) -> None:
     rows: dict[str, dict] = {}
     if path.exists():
         with open(path) as f:
-            old_hdrs = f.readline().rstrip("\n").split("\t")
+            old_h = f.readline().rstrip("\n").split("\t")
             for line in f:
                 cols = line.rstrip("\n").split("\t")
                 if cols and cols[0]:
-                    rows[cols[0]] = dict(zip(old_hdrs, cols))
-    rows[summary["sample"]] = {h: str(summary.get(h, "")) for h in _TSV_HEADERS}
+                    rows[cols[0]] = dict(zip(old_h, cols))
+    rows[row["sample"]] = {h: str(row.get(h, "")) for h in _TSV_HEADERS}
     with open(path, "w") as f:
         f.write("\t".join(_TSV_HEADERS) + "\n")
-        for row in rows.values():
-            f.write("\t".join(row.get(h, "") for h in _TSV_HEADERS) + "\n")
+        for r in rows.values():
+            f.write("\t".join(r.get(h, "") for h in _TSV_HEADERS) + "\n")

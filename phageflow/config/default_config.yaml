@@ -31,10 +31,16 @@ envs:
 
 assembly:
   # k-mers for SPAdes and MEGAHIT (same value for reproducibility).
-  # PE150: max effective k ≈ 127. Extending to 141 gives marginal gain.
-  # Bankevich et al. 2012, J Comp Biol 19:455.
-  kmers:      "21,33,55,77,99,127"
+  # k=141 is the MEGAHIT maximum; improves resolution in genomes >150 kb
+  # with long repetitive regions (Ackermannviridae, jumbo phages).
+  # Li et al. 2015, Bioinformatics 31:1674; Al-Shayeb et al. 2020, Nature 578:425.
+  kmers:      "21,33,55,77,99,127,141"
   min_length: 200
+
+  # Iterative refinement (opt-in). Run AFTER quality.py via phageflow assembly-refine.
+  # Re-assembles using annotation_ready candidates as --trusted-contigs.
+  # Bankevich et al. 2012; Wan et al. 2023, mSystems 8:e01334.
+  iterative_refinement: false
 
 host_removal:
   # Accessions always merged with --host-file / --accessions.

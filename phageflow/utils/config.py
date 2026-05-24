@@ -69,10 +69,15 @@ def load_samples(tsv_path: Path) -> List[Sample]:
 @dataclass
 class AssemblyConfig:
     # k-mers shared between SPAdes and MEGAHIT for reproducibility.
-    # Max 127 is sufficient for PE150; 141 gives marginal gain.
-    # Bankevich et al. 2012, J Comp Biol 19:455.
-    kmers:      str = "21,33,55,77,99,127"
+    # k=141 is the MEGAHIT maximum; improves resolution of repetitive regions
+    # in large genomes (Ackermannviridae, jumbo phages >150 kb).
+    # Li et al. 2015, Bioinformatics 31:1674; Al-Shayeb et al. 2020, Nature 578:425.
+    kmers:      str = "21,33,55,77,99,127,141"
     min_length: int = 200
+
+    # Iterative refinement (opt-in). Requires quality.py to have run first.
+    # See modules/assembly_refine.py — run AFTER quality.py.
+    iterative_refinement: bool = False
 
 
 @dataclass
@@ -328,6 +333,13 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
         a = raw["assembly"]
         cfg.assembly.kmers      = a.get("kmers",      cfg.assembly.kmers)
         cfg.assembly.min_length = int(a.get("min_length", cfg.assembly.min_length))
+
+    # assembly_refine (optional iterative refinement flag)
+    if "assembly" in raw:
+        a = raw.get("assembly", {})
+        cfg.assembly.iterative_refinement = bool(
+            a.get("iterative_refinement", cfg.assembly.iterative_refinement)
+        )
 
     # host_removal
     if "host_removal" in raw:

@@ -32,6 +32,7 @@ def _load(
     output_dir:  Optional[str] = None,
     reports_dir: Optional[str] = None,
     threads:     Optional[int] = None,
+    project:     Optional[str] = None,
 ) -> object:
     """Load config.yaml and apply CLI overrides.
 
@@ -42,6 +43,10 @@ def _load(
     Priority (highest → lowest):
         CLI flags  >  config.yaml values  >  auto-detected defaults
     """
+    if project:
+        p = Path(project)
+        config  = str(p / "config" / "config.yaml")
+        workdir = str(p)
     cfg_path = Path(config)
     if not cfg_path.exists():
         log_error(f"Config file not found: {cfg_path}")
@@ -86,6 +91,9 @@ def _log_threads(cfg) -> None:
 
 def common_options(f):
     """Options shared by every pipeline command."""
+    f = click.option(
+        "--project", default=None, type=click.Path(),
+        help="Project directory (from phageflow init). Overrides --config and --workdir.")(f)
     f = click.option(
         "-c", "--config",
         default="config/config.yaml", show_default=True,
@@ -187,7 +195,7 @@ def cli():
 @cli.command("qc")
 @common_options
 @reads_options
-def cmd_qc(config, workdir, output_dir, reports_dir, threads, force,
+def cmd_qc(config, workdir, output_dir, reports_dir, threads, force, project,
            sample_id, r1_path, r2_path):
     """Quality control and trimming for a single sample.
 
@@ -202,7 +210,7 @@ def cmd_qc(config, workdir, output_dir, reports_dir, threads, force,
       phageflow qc --sample-id s1 \\
         --r1 data/s1_R1.fastq.gz --r2 data/s1_R2.fastq.gz
     """
-    cfg = _load(config, workdir, output_dir, reports_dir, threads)
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
     from phageflow.modules.qc import run
     run(cfg, sample_id=sample_id,
         r1=Path(r1_path), r2=Path(r2_path), force=force)
@@ -231,7 +239,7 @@ def cmd_qc(config, workdir, output_dir, reports_dir, threads, force,
     "--kraken-db", default=None, type=click.Path(),
     help="Kraken2 database (used when no reference is provided).",
 )
-def cmd_host_removal(config, workdir, output_dir, reports_dir, threads, force,
+def cmd_host_removal(config, workdir, output_dir, reports_dir, threads, force, project,
                      sample_id, r1_path, r2_path,
                      host_file, accessions, accessions_file, kraken_db):
     """Remove host reads for a single sample.
@@ -289,7 +297,7 @@ def cmd_host_removal(config, workdir, output_dir, reports_dir, threads, force,
         "(Nayfach et al. 2021)."
     ),
 )
-def cmd_assembly(config, workdir, output_dir, reports_dir, threads, force,
+def cmd_assembly(config, workdir, output_dir, reports_dir, threads, force, project,
                  sample_id, r1_path, r2_path, s1_path):
     """De novo assembly for a single sample.
 
@@ -304,7 +312,7 @@ def cmd_assembly(config, workdir, output_dir, reports_dir, threads, force,
         --r2 results/02_host_removal/s1_R2.fastq.gz \\
         --s1 results/02_host_removal/s1_singletons.fastq.gz
     """
-    cfg = _load(config, workdir, output_dir, reports_dir, threads)
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
     from phageflow.modules.assembly import run
     run(cfg, sample_id=sample_id,
         r1=Path(r1_path), r2=Path(r2_path),
@@ -323,7 +331,7 @@ def cmd_assembly(config, workdir, output_dir, reports_dir, threads, force,
     "--contigs", required=True, type=click.Path(exists=True),
     help="NR contigs FASTA (output of assembly step).",
 )
-def cmd_viral_id(config, workdir, output_dir, reports_dir, threads, force,
+def cmd_viral_id(config, workdir, output_dir, reports_dir, threads, force, project,
                  sample_id, contigs):
     """Viral identification with geNomad.
 
@@ -343,7 +351,7 @@ def cmd_viral_id(config, workdir, output_dir, reports_dir, threads, force,
       phageflow viral-id --sample-id s1 \\
         --contigs results/03_assembly/combined/s1_contigs_nr.fasta
     """
-    cfg = _load(config, workdir, output_dir, reports_dir, threads)
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
     from phageflow.modules.viral_id import run
     run(cfg, sample_id=sample_id, contigs=Path(contigs), force=force)
 
@@ -359,7 +367,7 @@ def cmd_viral_id(config, workdir, output_dir, reports_dir, threads, force,
     "--virus-fna", required=True, type=click.Path(exists=True),
     help="Viral contigs FASTA (output of viral-id step).",
 )
-def cmd_quality(config, workdir, output_dir, reports_dir, threads, force,
+def cmd_quality(config, workdir, output_dir, reports_dir, threads, force, project,
                 sample_id, virus_fna):
     """Genome quality assessment and selection with CheckV.
 
@@ -375,7 +383,7 @@ def cmd_quality(config, workdir, output_dir, reports_dir, threads, force,
       phageflow quality --sample-id s1 \\
         --virus-fna results/04_viral_id/s1_virus.fna
     """
-    cfg = _load(config, workdir, output_dir, reports_dir, threads)
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
     from phageflow.modules.quality import run
     run(cfg, sample_id=sample_id, virus_fna=Path(virus_fna), force=force)
 
@@ -391,7 +399,7 @@ def cmd_quality(config, workdir, output_dir, reports_dir, threads, force,
     "--genome", required=True, type=click.Path(exists=True),
     help="Genome FASTA from quality step (annotation_ready/).",
 )
-def cmd_annotate(config, workdir, output_dir, reports_dir, threads, force,
+def cmd_annotate(config, workdir, output_dir, reports_dir, threads, force, project,
                  sample_id, genome):
     """Structural and functional annotation.
 
@@ -414,7 +422,7 @@ def cmd_annotate(config, workdir, output_dir, reports_dir, threads, force,
       phageflow annotate --sample-id s1 \\
         --genome results/05_quality/s1/annotation_ready/phages/Podoviridae_candidate_001.fasta
     """
-    cfg = _load(config, workdir, output_dir, reports_dir, threads)
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
     from phageflow.modules.annotate import run
     run(cfg, sample_id=sample_id, genome=Path(genome), force=force)
 
@@ -430,7 +438,7 @@ def cmd_annotate(config, workdir, output_dir, reports_dir, threads, force,
     "--genome", required=True, type=click.Path(exists=True),
     help="Genome FASTA.",
 )
-def cmd_safety(config, workdir, output_dir, reports_dir, threads, force,
+def cmd_safety(config, workdir, output_dir, reports_dir, threads, force, project,
                sample_id, genome):
     """Biosafety screening: CARD + VFDB via Pharokka output.
 
@@ -438,7 +446,7 @@ def cmd_safety(config, workdir, output_dir, reports_dir, threads, force,
     Example:
       phageflow safety --sample-id s1 --genome candidate.fasta
     """
-    cfg = _load(config, workdir, output_dir, reports_dir, threads)
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
     from phageflow.modules.safety import run
     run(cfg, sample_id=sample_id, genome=Path(genome), force=force)
 
@@ -454,7 +462,7 @@ def cmd_safety(config, workdir, output_dir, reports_dir, threads, force,
     "--candidate-id", required=True,
     help="Candidate genome ID (e.g. Podoviridae_candidate_001).",
 )
-def cmd_report(config, workdir, output_dir, reports_dir, threads, force,
+def cmd_report(config, workdir, output_dir, reports_dir, threads, force, project,
                sample_id, candidate_id):
     """Generate final HTML report for one annotated candidate genome.
 
@@ -466,7 +474,7 @@ def cmd_report(config, workdir, output_dir, reports_dir, threads, force,
       phageflow report --sample-id s1 \\
         --candidate-id Podoviridae_candidate_001
     """
-    cfg = _load(config, workdir, output_dir, reports_dir, threads)
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
     from phageflow.modules.report import run
     run(cfg, sample_id=sample_id, candidate_id=candidate_id, force=force)
 
@@ -495,7 +503,7 @@ def cmd_report(config, workdir, output_dir, reports_dir, threads, force,
     ),
     help="Resume pipeline from this module (skip earlier steps).",
 )
-def cmd_run(config, workdir, output_dir, reports_dir, threads, force,
+def cmd_run(config, workdir, output_dir, reports_dir, threads, force, project,
             host_file, accessions, from_module):
     """Run the full pipeline for all samples in samples.tsv.
 
@@ -680,3 +688,175 @@ def cmd_samples(output):
 
 if __name__ == "__main__":
     cli()
+
+
+# ---------------------------------------------------------------------------
+# phageflow init
+# ---------------------------------------------------------------------------
+
+@cli.command("init")
+@click.argument("project_dir", type=click.Path())
+@click.option("--force", is_flag=True, default=False,
+              help="Re-initialize even if project already exists.")
+def cmd_init(project_dir, force):
+    """Initialize a PhageFlow project directory.
+
+    \b
+    Creates:
+      PROJECT/
+        config/config.yaml      ← copy of default config
+        config/samples.tsv      ← sample manifest template
+        raw/                    ← place your FASTQ files here
+        results/                ← pipeline outputs
+        reports/                ← logs, TSVs, HTML reports
+
+    \b
+    After init, run from the project directory or use --project:
+      cd PROJECT && phageflow qc --sample-id s1 --r1 raw/s1_R1.fastq.gz ...
+      phageflow qc --project PROJECT --sample-id s1 ...
+    """
+    import shutil as _sh
+    from importlib.resources import files as _files
+
+    p = Path(project_dir)
+
+    if (p / "config" / "config.yaml").exists() and not force:
+        log_warn(
+            f"  {p} already contains a config. "
+            "Use --force to re-initialize (existing config will be overwritten)."
+        )
+        return
+
+    for sub in ("config", "raw", "results", "reports"):
+        (p / sub).mkdir(parents=True, exist_ok=True)
+
+    # Copy default config
+    cfg_dst = p / "config" / "config.yaml"
+    _sh.copy(
+        str(_files("phageflow.config").joinpath("default_config.yaml")),
+        cfg_dst,
+    )
+
+    # Write samples.tsv template
+    samples_dst = p / "config" / "samples.tsv"
+    if not samples_dst.exists() or force:
+        samples_dst.write_text(
+            "sample_id\tr1\tr2\n"
+            "# example\traw/example_R1.fastq.gz\traw/example_R2.fastq.gz\n"
+        )
+
+    # Write .phageflow marker
+    (p / ".phageflow").write_text(f"project_dir: {p.resolve()}\n")
+
+    log_ok(f"Project initialized at {p.resolve()}")
+    log_info(f"  Config   : {cfg_dst}")
+    log_info(f"  Samples  : {samples_dst}")
+    log_info(f"  Raw reads: place FASTQ files in {p / 'raw'}/")
+    log_info("")
+    log_info("  Next steps:")
+    log_info(f"    1. Edit {samples_dst}")
+    log_info(f"    2. Edit {cfg_dst}  (databases, threads, etc.)")
+    log_info(f"    3. phageflow qc --project {p} --sample-id SAMPLE_ID --r1 ... --r2 ...")
+
+
+# ---------------------------------------------------------------------------
+# phageflow status
+# ---------------------------------------------------------------------------
+
+@cli.command("status")
+@click.option("--project", default=None, type=click.Path(),
+              help="Project directory. Defaults to current directory.")
+@click.option("--sample-id", default=None,
+              help="Filter to a specific sample.")
+def cmd_status(project, sample_id):
+    """Show pipeline status for all samples in a project.
+
+    \b
+    Reads pipeline_status.tsv from the project reports directory.
+    Status is written automatically by each pipeline module.
+    """
+    from rich.table import Table
+    from phageflow.utils import status as _status
+
+    reports_dir = Path(project) / "reports" if project else Path("reports")
+    rows = _status.get_all(reports_dir)
+
+    if not rows:
+        log_info(f"No pipeline status found in {reports_dir}")
+        return
+
+    if sample_id:
+        rows = [r for r in rows if r.get("sample_id") == sample_id]
+
+    table = Table(title="PhageFlow Pipeline Status", show_lines=True)
+    table.add_column("Sample",   style="cyan",  min_width=12)
+    table.add_column("Module",   style="white", min_width=14)
+    table.add_column("Status",   style="bold",  min_width=10)
+    table.add_column("Started",  style="dim",   min_width=17)
+    table.add_column("Finished", style="dim",   min_width=17)
+    table.add_column("Notes",    style="yellow")
+
+    status_colors = {
+        "completed": "[bold green]completed[/bold green]",
+        "running":   "[bold cyan]running[/bold cyan]",
+        "failed":    "[bold red]failed[/bold red]",
+        "pending":   "[dim]pending[/dim]",
+        "skipped":   "[dim]skipped[/dim]",
+    }
+
+    for row in rows:
+        status_str = status_colors.get(row.get("status", ""), row.get("status", ""))
+        table.add_row(
+            row.get("sample_id", ""),
+            row.get("module", ""),
+            status_str,
+            row.get("started_at", ""),
+            row.get("finished_at", ""),
+            row.get("notes", ""),
+        )
+
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# assembly-refine
+# ---------------------------------------------------------------------------
+
+@cli.command("assembly-refine")
+@common_options
+@click.option("--sample-id",  required=True, help="Sample identifier.")
+@click.option("--r1",  "r1_path", required=True, type=click.Path(exists=True),
+              help="R1 reads (from host-removal step).")
+@click.option("--r2",  "r2_path", required=True, type=click.Path(exists=True),
+              help="R2 reads (from host-removal step).")
+@click.option("--s1",  "s1_path", default=None, type=click.Path(),
+              help="Singleton reads from bwa-mem2 host-removal (optional).")
+def cmd_assembly_refine(config, workdir, output_dir, reports_dir, threads,
+                        force, project, sample_id, r1_path, r2_path, s1_path):
+    """Iterative assembly refinement using annotation_ready candidates as anchors.
+
+    \b
+    Run AFTER quality. Uses annotation_ready candidates as --trusted-contigs
+    and unmapped + bridge reads to extend through repeat-induced gaps.
+    Replaces fragmented candidates with more complete assemblies when possible.
+
+    \b
+    References:
+      Bankevich et al. 2012, J Comput Biol 19:455 (SPAdes trusted-contigs)
+      Wan et al. 2023, mSystems 8:e01334 (iterative phage assembly)
+
+    \b
+    Example:
+      phageflow assembly-refine --sample-id test4 \\
+        --r1 results/02_host_removal/test4_R1.fastq.gz \\
+        --r2 results/02_host_removal/test4_R2.fastq.gz \\
+        --s1 results/02_host_removal/test4_singletons.fastq.gz
+    """
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    from phageflow.modules.assembly_refine import run
+    run(
+        cfg, sample_id=sample_id,
+        r1=Path(r1_path), r2=Path(r2_path),
+        s1=Path(s1_path) if s1_path else None,
+        force=force,
+    )
