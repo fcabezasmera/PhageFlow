@@ -103,7 +103,7 @@ _Q30_GOOD   = 85.0
 _Q30_WARN   = 75.0
 _DUP_WARN   = 70.0    # k-mer–based; inflated at high phage coverage
 _MIN_READS  = 50_000  # for 50× on 150 kb phage at PE150
-_AVG_QUAL   = 25
+_AVG_QUAL   = 20
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -252,7 +252,7 @@ def _run_fastp(
         "--length_required",            "75",
         # Low-complexity filter (Roux et al. 2019)
         "--low_complexity_filter",
-        "--complexity_threshold",       "30",
+        "--complexity_threshold",       "15",
         # Poly-X tail filter — targets NextSeq/NovaSeq poly-G artefacts.
         # Flag renamed in fastp 1.x: --poly_x_filter → --trim_poly_x (-x).
         # Poly-G is already trimmed automatically for NextSeq/NovaSeq by default
@@ -562,7 +562,7 @@ def _print_completion_panel(
         title=f"[bold cyan]QC complete — {sample_id}[/bold cyan]",
         border_style="cyan",
         padding=(0, 2),
-        width=90,
+        width=120,
     ))
 
 

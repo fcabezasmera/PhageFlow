@@ -677,7 +677,7 @@ def _print_completion_panel(
     console.print(Panel(
         "\n".join(lines),
         title=f"[bold cyan]Viral ID complete — {sample_id}[/bold cyan]",
-        border_style="cyan", padding=(0, 2), width=90,
+        border_style="cyan", padding=(0, 2), width=120,
     ))
 
 

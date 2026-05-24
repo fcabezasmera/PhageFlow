@@ -1198,7 +1198,7 @@ def _print_completion_panel(
         title=f"[bold cyan]Annotation complete — {candidate_id}[/bold cyan]",
         border_style="cyan",
         padding=(0, 2),
-        width=100,
+        width=120,
     ))
 
 
