@@ -14,8 +14,9 @@
 |------|-------------|
 | Fausto Cabezas-Mera | Universidad Tecnológica Metropolitana, Santiago, Chile |
 | Estefania Tisalema-Guanopatin | Universidad Tecnológica Metropolitana, Santiago, Chile |
-| Dayra Valle | Universidad Tecnológica Metropolitana, Santiago, Chile |
-| Antonella Nole | Universidad Tecnológica Metropolitana, Santiago, Chile |
+| Dayra Valle | Universidad Internacional SEK, Quito, Ecuador |
+| Antonella Nole | Universidad Internacional SEK, Quito, Ecuador |
+| Katty Coral Carrillo | Universidad Internacional SEK, Quito, Ecuador |
 
 ---
 
