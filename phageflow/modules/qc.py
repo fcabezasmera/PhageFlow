@@ -31,26 +31,22 @@ fastp parameters (literature-based for complete phage genome recovery):
         of 40% to retain only high-quality reads (Wick & Holt 2022,
         Microb Genomics 8:mgen000788).
 
-    --average_qual 25
-        Read-level mean quality floor. Complements the per-base filter;
+    --average_qual 20
+        Read-level mean quality floor.  Complements the per-base filter;
         better predictor of assembly quality than per-base alone
         (Wick & Holt 2022).
 
     --length_required 75
         Minimum read length for PE150 data (Bankevich et al. 2012).
 
-    --low_complexity_filter --complexity_threshold 30
+    --low_complexity_filter --complexity_threshold 15
         Removes homopolymer / low-complexity reads (Roux et al. 2019, eLife).
 
     --trim_poly_x / --poly_x_min_len 10
         Removes reads with poly-X tails ≥10 bp. Targets poly-G artefacts
         produced by NextSeq and NovaSeq 2-colour chemistry when signal is
-        absent at the 3′ end. These reads pass --low_complexity_filter because
-        the rest of the read is of acceptable quality, but the poly-G tail
-        inflates k-mers in the De Bruijn graph and reduces assembly contiguity.
-        Note: in fastp 1.x the flag was renamed from --poly_x_filter to
-        --trim_poly_x (-x). Poly-G is already trimmed automatically for
-        NextSeq/NovaSeq by fastp 1.x; --trim_poly_x covers poly-A/C/T.
+        absent at the 3′ end. Poly-G is auto-trimmed for NextSeq/NovaSeq;
+        --trim_poly_x adds coverage for poly-A/C/T tails.
         Chen et al. 2018, Genome Biology 19:274.
 
     --n_base_limit 5
@@ -58,16 +54,15 @@ fastp parameters (literature-based for complete phage genome recovery):
 
 Thresholds:
 
-    _PASS_WARN  = 75%  : below this, the strict HQ parameters (--average_qual 25,
-                         --unqualified_percent_limit 10) are removing an unusual
-                         number of reads. Check raw read quality.
-                         Note: 75–85% pass rates are EXPECTED with strict filters
-                         (Wick & Holt 2022).
+    _PASS_WARN  = 75%  : below this, the strict HQ parameters are removing
+                         an unusual number of reads. Check raw read quality.
+                         Note: 75–85% pass rates are EXPECTED with strict
+                         filters (Wick & Holt 2022).
 
     _DUP_WARN   = 70%  : fastp uses k-mer sampling, not coordinate-based
                          deduplication. At high phage coverage (100–5000×),
-                         50–70% apparent duplication is normal (Head et al. 2014,
-                         BMC Genomics 15:179; Roux et al. 2019).
+                         50–70% apparent duplication is normal (Head et al.
+                         2014, BMC Genomics 15:179; Roux et al. 2019).
 
     _MIN_READS  = 50,000 : minimum reads post-filter for 50× on a 150 kb phage
                            genome at PE150. Required for DTR/ITR detection in
@@ -81,7 +76,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from rich.panel import Panel
-from rich.text import Text
 from rich.progress import (
     Progress, SpinnerColumn, TextColumn,
     BarColumn, MofNCompleteColumn, TimeElapsedColumn,
@@ -121,10 +115,8 @@ def run(
     -------
     (r1_out, r2_out) : paths to trimmed reads
     """
-    require_tools(*TOOLS)
-
     out_dir = cfg.results(STEP)
-    rpt_dir = cfg.reports(STEP) / sample_id   # per-sample: avoids mixing reports
+    rpt_dir = cfg.reports(STEP) / sample_id
     mkdirs(out_dir, rpt_dir)
 
     r1 = Path(r1)
@@ -142,17 +134,18 @@ def run(
     html_f = rpt_dir / f"{sample_id}_fastp.html"
     log_f  = rpt_dir / f"{sample_id}_fastp.log"
 
+    already_done = r1_out.exists() and r1_out.stat().st_size > 0 and not force
+    if not already_done:
+        require_tools(*TOOLS)
+
     log_step(f"Module 01 — QC  [{sample_id}]")
     log_info(f"  R1 : {r1}  ({human_size(r1)})")
     log_info(f"  R2 : {r2}  ({human_size(r2)})")
     log_info(
-        "  Params : Q≥20 per-base · mean-Q≥25 · ≤10% low-qual · len≥75bp · "
-        "complexity≥30% · poly-X≥10bp · PE correction · adapter auto-detect"
+        "  Params : Q≥20 per-base · mean-Q≥20 · ≤10% low-qual · len≥75bp · "
+        "complexity≥15% · poly-X≥10bp · PE correction · adapter auto-detect"
     )
 
-    already_done = r1_out.exists() and r1_out.stat().st_size > 0 and not force
-
-    # Collect warnings for the completion panel
     active_warnings: list[str] = []
 
     with Progress(
@@ -212,10 +205,8 @@ def _run_fastp(
     --trim_poly_x / --poly_x_min_len 10
         NextSeq and NovaSeq use 2-colour chemistry. When signal is absent,
         the instrument calls G, producing poly-G artefacts at the 3′ end.
-        --low_complexity_filter does not fully capture these because the
-        remainder of the read may be high-quality. Filtering poly-X tails
-        ≥10 bp removes these artefacts before assembly.
-        Flag renamed in fastp 1.x: --poly_x_filter → --trim_poly_x (-x).
+        Poly-G is auto-trimmed for NextSeq/NovaSeq; --trim_poly_x adds
+        coverage for poly-A/C/T tails.
         Reference: Chen et al. 2018, Genome Biology 19:274.
 
     --correction / --overlap_len_require 10
@@ -223,10 +214,9 @@ def _run_fastp(
         Requires ≥10 bp overlap. Corrects mismatches ≤10%.
         Reference: Chen et al. 2018.
 
-    --average_qual 25
-        Read-level floor complements the per-base filter. A read uniformly
-        at Q20 (passes --qualified_quality_phred) but with mean Q21 is likely
-        too noisy for k-mer-based assembly. Wick & Holt 2022.
+    --average_qual 20
+        Read-level floor complements the per-base filter.
+        Reference: Wick & Holt 2022.
     """
     cmd = [
         "fastp",
@@ -253,10 +243,8 @@ def _run_fastp(
         # Low-complexity filter (Roux et al. 2019)
         "--low_complexity_filter",
         "--complexity_threshold",       "15",
-        # Poly-X tail filter — targets NextSeq/NovaSeq poly-G artefacts.
-        # Flag renamed in fastp 1.x: --poly_x_filter → --trim_poly_x (-x).
-        # Poly-G is already trimmed automatically for NextSeq/NovaSeq by default
-        # in fastp 1.x; --trim_poly_x adds coverage for poly-A/C/T tails.
+        # Poly-X tail filter. Poly-G is auto-trimmed for NextSeq/NovaSeq;
+        # --trim_poly_x adds coverage for poly-A/C/T tails.
         # Chen et al. 2018, Genome Biology 19:274.
         "--trim_poly_x",
         "--poly_x_min_len",             "10",
@@ -310,9 +298,14 @@ def _run_fastqc_parallel(r1: Path, r2: Path, rpt_dir: Path, log_f: Path) -> None
     def _fastqc(read: Path) -> None:
         if not read.exists():
             return
-        stem   = read.name.replace(".fastq.gz", "").replace(".fastq", "")
-        html_ok = (rpt_dir / f"{stem}_fastqc.html").exists()
-        if html_ok:
+        name = read.name
+        for ext in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
+            if name.endswith(ext):
+                stem = name[: -len(ext)]
+                break
+        else:
+            stem = read.stem
+        if (rpt_dir / f"{stem}_fastqc.html").exists():
             return
         try:
             run_silent(
@@ -328,12 +321,7 @@ def _run_fastqc_parallel(r1: Path, r2: Path, rpt_dir: Path, log_f: Path) -> None
 
 
 def _run_multiqc(rpt_dir: Path, sample_id: str) -> None:
-    """Run MultiQC on only this sample's QC files.
-
-    rpt_dir is already per-sample (cfg.reports(STEP) / sample_id), so
-    MultiQC sees only this sample's fastp JSON and FastQC zips — no
-    cross-sample aggregation.
-    """
+    """Run MultiQC on only this sample's QC files."""
     mqc_dir = rpt_dir / "multiqc"
     mkdirs(mqc_dir)
     try:
@@ -347,8 +335,8 @@ def _run_multiqc(rpt_dir: Path, sample_id: str) -> None:
             ],
             log_file=rpt_dir / "multiqc.log", check=False,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        log_warn(f"  [MultiQC] {e} — QC report not generated")
 
 
 # ── JSON parsing ──────────────────────────────────────────────────────────────
@@ -486,13 +474,8 @@ def _print_completion_panel(
     m:         dict,
     active_warnings: list[str],
 ) -> None:
-    """Standardised completion panel: key metrics · outputs · warnings.
-
-    Uses markup strings (not Text objects) so Rich interprets colour tags.
-    """
 
     def _c(val_str: str, good: float, warn: float) -> str:
-        """Return val_str wrapped in the appropriate Rich colour tag."""
         try:
             v = float(val_str.rstrip("%"))
             if v >= good: return f"[bold green]{val_str}[/bold green]"
@@ -506,7 +489,6 @@ def _print_completion_panel(
 
     lines: list[str] = []
 
-    # ── Key metrics ──
     lines.append("[bold]Key metrics[/bold]")
     lines.append(
         f"  [cyan]Reads   :[/cyan] {_f(m['reads_in'])} → {_f(m['reads_out'])}"
@@ -527,7 +509,6 @@ def _print_completion_panel(
     )
     lines.append(f"  [cyan]PE corr :[/cyan] {_f(m['correction_rate'])}")
 
-    # Filtering breakdown (non-zero only)
     _FILT = {
         "filt_lowqual":    "low-qual",
         "filt_tooshort":   "too-short",
@@ -543,14 +524,12 @@ def _print_completion_panel(
     if parts:
         lines.append(f"  [dim]Filtered: {' · '.join(parts)}[/dim]")
 
-    # ── Output files ──
     lines.append("")
     lines.append("[bold]Output files[/bold]")
     lines.append(f"  Trimmed R1 : {r1_out}")
     lines.append(f"  Trimmed R2 : {r2_out}")
     lines.append(f"  MultiQC    : {rpt_dir / 'multiqc' / 'multiqc_qc.html'}")
 
-    # ── Active warnings ──
     if active_warnings:
         lines.append("")
         lines.append("[bold yellow]Warnings[/bold yellow]")
