@@ -1,101 +1,95 @@
 """PhageFlow Module 05 — Genome quality assessment and selection (CheckV).
 
-Goal: evaluate viral contigs produced by viral_id, assign quality tiers,
-dereplicate near-identical candidates, co-bin low-quality contigs by taxon,
-and produce annotation-ready FASTA files for annotate.py.
+Goal: evaluate viral contigs from viral_id, assign quality tiers based on
+completeness and genome integrity, dereplicate near-identical genomes, and
+produce annotation-ready FASTA files for annotate.py.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Tool: CheckV end-to-end
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tool: CheckV end-to-end (Nayfach et al. 2021, Nat Biotechnol 39:578)
+  CheckV estimates genome completeness via two complementary methods:
+  AAI-based    : amino acid identity against curated viral genome DB.
+                 Most precise when a close reference exists in the DB.
+  HMM-based    : gene-content lower bound using viral protein HMMs.
+                 Used for novel lineages without close DB references.
+                 Tends to UNDERESTIMATE completeness for divergent viruses;
+                 a contig reporting 40-49% completeness via HMM may be
+                 genuinely complete but divergent from all DB entries.
 
-CheckV estimates completeness via AAI against a curated viral genome DB
-and via HMM-based gene content (Nayfach et al. 2021, Nat Biotechnol 39:578).
+Quality tiers (priority order)
+  complete     : CheckV = Complete (DTR or ITR detected in sequence)
+                 → annotation_ready/phages/
+  high-quality : completeness ≥ 90%
+                 → annotation_ready/phages/
+  medium-quality: completeness ≥ min_completeness (default 50%)
+                 MIUViG standard for medium-quality draft genomes.
+                 Roux et al. 2019 (Nat Biotechnol 37:505).
+                 → annotation_ready/phages/
+  large-nd     : Not-determined, length ≥ large_nd_rescue_bp (20 kb),
+                 ≥ 1 viral gene. Captures large divergent phages with no
+                 CheckV reference. Jumbo phages (>200 kb) frequently fall
+                 in this tier (Al-Shayeb et al. 2020, Nature 578:425).
+                 → annotation_ready/phages/
+  lq-draft     : length ≥ length_rescue (10 kb), ≥ min_viral_genes (1).
+                 Candidate for co-binning by taxonomy.
+                 → drafts/ or bin-rescue
+  bin-rescue   : LQ drafts of the same naming_level with combined
+                 length ≥ min_bin_rescue_bp (30 kb). Captures fragmented
+                 genomes where no single contig meets quality thresholds.
+                 → annotation_ready/phages/ (multi-contig FASTA)
+  discarded    : length < min_contig_bp or no viral genes.
 
-Completeness methods:
-  AAI-based  : alignment against CheckV reference genomes (most precise)
-  HMM-based  : gene-content based lower bound (used when no close reference)
+Topology resolution (CheckV > geNomad, confirmed > predicted)
+  CheckV termini_type takes precedence over geNomad topology prediction:
+  CheckV confirms DTR/ITR by detecting ≥20 bp terminal repeats in the
+  actual assembled sequence. geNomad predicts topology from sequence
+  composition, which is less reliable for novel lineages.
+  Priority: CheckV DTR → DTR (circular, most tailed dsDNA phages)
+            CheckV ITR → ITR (linear with ITR, e.g. T7-like phages)
+            CheckV NA  → geNomad topology or "No terminal repeats"
+  Downstream: DTR → circular genome map + dnaapler reorientation
+              ITR → linear genome map + dnaapler terL detection
+              other → linear genome map
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Quality tiers
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  complete     CheckV = Complete (DTR or ITR detected)  → annotation_ready/
-  high-quality completeness ≥ 90%                       → annotation_ready/
-  medium-quality completeness ≥ min_completeness (50%)  → annotation_ready/
-  large-nd     ND, length ≥ large_nd_rescue_bp (30 kb), ≥1 viral gene
-               Captures jumbo phages with no CheckV reference.
-                                                        → annotation_ready/
-  lq-draft     length ≥ length_rescue (10 kb), ≥ min_viral_genes (1)
-               Candidate for co-binning by taxon.       → drafts/ or bin
-  bin-rescue   LQ drafts grouped by naming_level,
-               combined length ≥ min_bin_rescue_bp (30 kb)
-                                                        → annotation_ready/
-  discarded    length < min_contig_bp or no viral genes
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Topology resolution
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  CheckV termini_type takes PRECEDENCE over geNomad topology:
-  CheckV confirms DTR/ITR in the actual assembled sequence (≥20 bp repeat),
-  whereas geNomad topology is predicted from sequence composition.
-
-  Priority:  CheckV DTR → "DTR"
-             CheckV ITR → "ITR"
-             CheckV NA  → use geNomad topology as context
-                          "No terminal repeats" or "NA"
-
-  DTR  : circular genome (most tailed dsDNA phages)
-  ITR  : linear genome with ITR (e.g. T7-like Autographiviridae)
-  other: undetermined topology
-
-  Downstream impact (annotate.py):
-    DTR  → circular map (phold), dnaapler phage reorientation
-    ITR  → linear map (pyGenomeViz), dnaapler phage (finds terL, no circular implied)
-    other → linear map
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Dereplication (mash)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
+Dereplication strategy (ANI-based, strain-level)
   Applied to single-contig annotation_ready candidates only.
-  Clusters at mash distance < 0.02 (ANI > 98%).
-  The ICTV species boundary is 95% ANI; 98% is the same strain.
-  Turner et al. 2021, Arch Virol 166:2633.
+  Large genomes (≥20 kb): blastn all-vs-all (ANI ≥ 95%, coverage ≥ 80%).
+    blastn detects near-identical non-overlapping fragments that mash
+    misses due to disjoint k-mer content (see quality.py BLAST discussion).
+  Small genomes (<20 kb): minimap2 asm5 all-vs-all (identity ≥ 95%,
+    max coverage ≥ 80%). mash is unreliable at this size range due to
+    sparse k-mer sketch sampling.
+  Fallbacks: mash → cd-hit-est if blastn/minimap2 unavailable.
+  Threshold: 95% ANI = ICTV species boundary (Turner et al. 2021,
+    Arch Virol 166:2633). Clusters at 95% retain strain-level diversity.
+  Within each cluster: longest contig is kept as representative.
 
-  Within each cluster: keep the longest contig.
-  Discarded duplicates are logged in rename_map.tsv (tier = dereplicated).
-  Fallback: cd-hit-est at 98% if mash is not available.
+Special case warnings (never discards)
+  Concatemers : kmer_freq > 1.5 OR genome_copies > 1.5.
+                High-coverage lytic replication generates DNA concatemers.
+                The sequence is valid; the contig may represent N linked
+                genome copies. Common in purified phage preparations.
+  Host genes  : host_genes > 0 indicates possible residual contamination
+                that survived host removal. Inspect contamination.tsv.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Special case warnings (never discards — always WARN only)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Coverage validation (read recruitment)
+  Post-dereplication, post-host-removal reads are mapped back to
+  annotation_ready candidates using bwa-mem2.
+  Metrics: mean_depth, breadth (≥1x positions), CV (depth uniformity).
+  breadth < 95%: uncovered region — possible assembly gap or chimera.
+  CV > 1.5     : uneven depth — possible concatemer or chimeric assembly.
+  Roux et al. 2019 (eLife 8:e42923) — read recruitment as genome integrity
+  validation; Nayfach et al. 2021 (Nat Biotechnol 39:578).
 
-  Concatemer  kmer_freq > max_kmer_freq (1.5) OR genome_copies > 1.5
-              High-coverage purified preps accumulate DNA concatemers
-              during lytic replication. The sequence is valid; the contig
-              may represent N linked copies of the genome.
-  Host genes  host_genes > 0: possible residual host contamination
-              that survived host removal.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Output files
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
+Output layout
   results/05_quality/{sample_id}/
-      annotation_ready/phages/
-          {naming_level}_candidate_001.fasta
-      annotation_ready/proviruses/
-      drafts/
-          {naming_level}_draft_001.fasta
-      checkv/                       ← CheckV raw output
-
+    annotation_ready/phages/   {naming_level}_candidate_{N:03d}.fasta
+    annotation_ready/proviruses/
+    drafts/                    {naming_level}_draft_{N:03d}.fasta
+    checkv/                    raw CheckV output
   reports/05_quality/{sample_id}/
-      rename_map.tsv                ← contig→candidate + ALL metadata
-      quality_summary.tsv           ← module summary
-      {sample_id}_quality.log
+    rename_map.tsv             contig→candidate + all metadata (critical link)
+    quality_summary.tsv        module-level statistics
+    coverage/                  read recruitment BAM + depth TSV
 """
-
 from __future__ import annotations
 import csv
 import math
@@ -165,7 +159,10 @@ def run(
     force:        bool = False,
     metadata_tsv: Optional[Path] = None,
 ) -> tuple[Path, Path]:
-    """Module"""
+    """Assess quality, dereplicate, and select annotation-ready viral genomes.
+
+    Returns (ann_phages, drafts_dir) paths.
+    """
     virus_fna = Path(virus_fna)
     out_dir   = cfg.results(STEP) / sample_id
     rpt_dir   = cfg.reports(STEP) / sample_id
@@ -1242,13 +1239,19 @@ def _read_recruitment_coverage(
     try:
         run_silent(["bwa-mem2", "index", str(combined)], log_file=log_f)
         run_silent(
-            f"bwa-mem2 mem -t {threads} {combined} {r1} {r2} "
+            # -M: mark split reads as secondary (consistent with host_removal).
+            # Default parameters used here (not permissive): coverage validation
+            # measures genuine mapping of reads to their source genome.
+            f"bwa-mem2 mem -t {threads} -M {combined} {r1} {r2} "
+            f"| samtools view -@ {min(threads,8)} -bF 2304 -u "
             f"| samtools sort -@ {min(threads, 8)} -o {bam}",
             log_file=log_f, shell=True,
         )
         run_silent(["samtools", "index", str(bam)], log_file=log_f)
         subprocess.run(
-            ["samtools", "depth", "-a", str(bam)],
+            # -Q 20: skip alignments with mapQ < 20 to avoid
+            # spurious coverage from low-confidence multimappers.
+            ["samtools", "depth", "-a", "-Q", "20", str(bam)],
             stdout=open(depth_tsv, "w"),
             stderr=subprocess.DEVNULL,
             check=True, timeout=600,
