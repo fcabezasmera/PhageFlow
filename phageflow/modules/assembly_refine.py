@@ -284,7 +284,7 @@ def _run_spades_refine(
         "--trusted-contigs", str(combined),
         "--pe1-1", str(unmapped_r1),
         "--pe1-2", str(unmapped_r2),
-        "-k", cfg.assembly.kmers,
+        "-k", ",".join(k for k in cfg.assembly.kmers.split(",") if int(k) <= 127),
         "-t", str(cfg.threads),
         "-m", str(cfg.memory_gb),
         "-o", str(out_dir),
@@ -354,7 +354,7 @@ def _load_checkv_quality(checkv_dir: Path) -> dict:
             cid = row.get("contig_id", "").strip()
             result[cid] = {
                 "quality":     row.get("checkv_quality", ""),
-                "completeness": float(row.get("completeness") or 0),
+                "completeness": float(row.get("completeness") or 0) if (row.get("completeness") or "0") not in ("NA", "na", "") else 0.0,
                 "length":      int(row.get("contig_length") or 0),
                 "termini":     row.get("termini_type", ""),
             }
