@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-
 from rich.panel import Panel
 from rich.progress import (
     Progress, SpinnerColumn, TextColumn, BarColumn,
