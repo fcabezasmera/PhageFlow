@@ -1,10 +1,10 @@
 # PhageFlow
 
-**Modular bacteriophage genomics pipeline for complete genome recovery from Illumina paired-end sequencing of purified phage preparations.**
+**Modular bacteriophage genomics pipeline for complete and high-quality viral genome recovery from Illumina paired-end sequencing.**
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.0-green.svg)](CHANGELOG.md)
 
 ---
 
@@ -29,13 +29,6 @@
 5. [Database Setup](#database-setup)
 6. [Quick Start](#quick-start)
 7. [Module Reference](#module-reference)
-   - [Module 01: Quality Control](#module-01-quality-control)
-   - [Module 02: Host Read Removal](#module-02-host-read-removal)
-   - [Module 03: De Novo Assembly](#module-03-de-novo-assembly)
-   - [Module 04: Viral Identification](#module-04-viral-identification)
-   - [Module 05: Genome Quality Assessment](#module-05-genome-quality-assessment)
-   - [Module 05b: Assembly Refinement](#module-05b-assembly-refinement-optional)
-   - [Module 06: Structural Annotation](#module-06-structural-annotation)
 8. [Configuration Reference](#configuration-reference)
 9. [Output Structure](#output-structure)
 10. [CLI Reference](#cli-reference)
@@ -47,82 +40,94 @@
 
 ## Overview
 
-PhageFlow is designed for researchers working with **purified phage preparations** sequenced on Illumina paired-end platforms (PE150). It implements a sequential, module-based workflow that processes raw reads through quality control, host depletion, de novo assembly, viral identification, genome quality assessment, and multi-tier structural annotation.
+PhageFlow recovers complete and high-quality (HQ) phage genomes from Illumina paired-end sequencing. It supports **purified phage preparations**, **mixed virome samples**, and **environmental metagenomes**. No prior knowledge of sample composition is required — PhageFlow makes no assumptions about the non-host fraction until viral identification (Module 04).
 
 **Design principles:**
 
-- **Modularity**: each module is independently re-runnable with `--force` to re-execute or `--from-module` to resume
-- **Reproducibility**: all parameters are controlled by a single `config/config.yaml`; no hard-coded thresholds
-- **Transparency**: every module writes structured TSV reports and logs all external commands
-- **Scientific rigour**: all methodological decisions are documented with primary literature references
+- **Composition-agnostic**: modules 01–03 do not assume the input is viral
+- **Modularity**: each module is independently re-runnable (`--force`) or resumable (`--from-module`)
+- **Reproducibility**: all parameters controlled by a single `config/config.yaml`
+- **Evidence-based**: all methodological decisions documented with primary literature
+- **Read-length aware**: auto-detects PE150/PE250/PE300 and adjusts QC and assembly parameters
 
 **Supported sample types:**
 
-| Sample type | Recommended mode | Notes |
-|-------------|-----------------|-------|
-| Purified phage (single) | bwa-mem2 + SPAdes `--isolate` | Primary use case |
-| Purified phage (mixed) | bwa-mem2 + SPAdes `--isolate` | Multiple hosts in `always_include_accessions` |
-| Low-coverage preparation | MEGAHIT fallback | Automatic when SPAdes produces no contigs |
-| Fragmented genome | assembly-refine | Run after quality step |
+| Sample type | Host removal mode | Notes |
+|-------------|-------------------|-------|
+| Purified phage (single host) | bwa-mem2 + accessions | Recommended; most accurate |
+| Purified phage (multiple hosts) | bwa-mem2 + multiple accessions | Concatenated reference |
+| Virome / enriched preparation | Kraken2 | No host genome required |
+| Environmental metagenome | Kraken2 | unclassified + viral reads retained |
+| No host removal needed | pass-through | Reads forwarded directly to assembly |
 
 ---
 
 ## Pipeline Architecture
 
 ```
-Raw reads (PE150 Illumina)
+Raw reads (PE150 / PE250 / PE300 Illumina)
     │
     ▼  phageflow qc
 01  Quality control + trimming
-    fastp (adapter trim · PE correction · poly-X · complexity filter)
-    FastQC (per-read QC)
-    MultiQC (aggregate report)
+    fastp — adapter trim · PE correction · poly-X · complexity filter
+            auto-detects read length; adjusts length_required and overlap
+    FastQC — per-read QC reports
+    MultiQC — aggregated QC report
     │
     ▼  phageflow host-removal
 02  Host read removal
-    bwa-mem2 (alignment-based, streaming, no BAM on disk)
-    ↳ singletons retained for DTR/ITR boundary coverage
-    Optional: Kraken2 (classification-based, with optional bwa-mem2 post-filter)
-    Optional: Level A contamination check (subsample Kraken2 diagnostic)
+    bwa-mem2 (recommended) — permissive alignment (-A 1 -B 2 -O 2,2)
+    ↳ singletons retained for DTR/ITR boundary coverage → SPAdes --s1
+    ↳ Level A contamination check (Kraken2 diagnostic on 50k subsample)
+    Kraken2 (alternative) — classification-based; unclassified + viral retained
     │
     ▼  phageflow assembly
 03  De novo assembly
-    SPAdes --isolate (primary; with singletons as --s1)
-    MEGAHIT --no-mercy --min-count 2 (secondary)
-    cd-hit-est (NR reduction at 100% identity)
+    SPAdes standard mode — paired reads + singletons (--s1)
+    MEGAHIT — complementary assembler (different graph algorithm)
+    cd-hit-est — NR reduction (100% identity, 85% coverage)
+    k-mer range auto-adjusted: PE150 → k≤127; PE250 → k≤241; PE300 → k≤281
+    │
+    ▼  phageflow coverage
+03b Coverage profiling (CoverM)
+    mean · trimmed_mean (5-95%) · covered_bases · variance
+    Warns: low coverage (<5x), ultra-high (>1000x), high CV (>2.0)
     │
     ▼  phageflow viral-id
-04  Viral identification
-    geNomad end-to-end (k-mer + neural network)
+04  Viral identification (geNomad)
+    Neural network + MMseqs2 marker gene search
     ↳ topology inference (DTR / ITR / No terminal repeats)
     ↳ genetic code detection (standard=11, CrAss-like=15)
-    ↳ taxonomy (family → finest level, --lenient-taxonomy)
+    ↳ taxonomy (lenient — resolves below family rank)
+    Rescue tier: borderline contigs (score 0.4–0.7) ≥ 3 kb retained
     │
     ▼  phageflow quality
-05  Genome quality and selection
-    CheckV end-to-end (completeness via AAI + HMM)
-    mash / minimap2 (dereplication at >98% ANI)
-    co-binning (LQ drafts → annotation_ready when combined ≥30 kb)
-    bwa-mem2 (read recruitment coverage validation)
-    │
-    [optional: phageflow assembly-refine]
-05b Iterative assembly refinement
-    Reads unmapped to candidates → SPAdes --trusted-contigs
-    CheckV re-evaluation → replace improved candidates
+05  Genome quality and selection (CheckV)
+    Quality tiers: Complete → HQ (≥90%) → MQ (≥50%) → large-ND (≥20 kb) → LQ-draft
+    Dereplication: blastn (large ≥20 kb) + minimap2 (small <20 kb) at 95% ANI
+    ↳ Circular rotation detection: cumulative multi-hit blastn coverage
+    Co-binning: LQ drafts by taxonomy → bin-rescue if combined ≥30 kb
+    bwa-mem2 read recruitment: depth · breadth · CV per candidate
     │
     ▼  phageflow annotate
-06  Structural annotation (three-tier cascade)
-    Tier 1  Pharokka   gene calling (PHANOTATE/prodigal-gv)
-                       PHROGs MMseqs2 + PyHMMER
-    Tier 2  Phold      ProstT5 + Foldseek structure-based upgrade
-    Tier 3  Phynteny   Transformer + ESM2 synteny upgrade
-    Plot               phold plot (circular) OR pyGenomeViz (linear multi-track)
+06  Structural annotation (two-tier cascade)
+    Tier 1  Pharokka  — PHANOTATE (single) / prodigal-gv (meta)
+                        MMseqs2 + PyHMMER vs PHROGs
+                        --coding_table from genome header (CrAss-like → 15)
+                        --dnaapler reorientation (single-contig only)
+    Tier 2  Phold     — ProstT5 3Di tokens + Foldseek structural search
+                        --hyps: upgrades hypothetical proteins only
+                        --finetune: phage-finetuned ProstT5 model
+    Plot    phold plot (circular, single-contig) / pyGenomeViz (linear, multi-contig)
     │
-    ▼  phageflow safety
-    Biosafety screening  CARD (AMR) + VFDB (virulence factors)
-    │
-    ▼  phageflow report
-    Final HTML report per candidate genome
+    ▼  phageflow resistance
+07  Resistance + biosafety screening
+    AMR       CARD (Pharokka seq + Phold struct, dual-evidence)
+    Virulence VFDB (Pharokka seq + Phold struct, dual-evidence)
+    ACR       Anti-CRISPR proteins (Phold ACR database)
+    Defense   DefenseFinder systems (Phold)
+    TA        Toxin-antitoxin (Phold NetFlax)
+    biosafety_flag: YES if any AMR or virulence hits
 ```
 
 ---
@@ -134,13 +139,13 @@ Raw reads (PE150 Illumina)
 | Resource | Minimum | Recommended |
 |----------|---------|-------------|
 | CPU | 8 cores | 24+ cores |
-| RAM | 16 GB | 32–64 GB |
-| GPU | — | NVIDIA GPU for Phold (ProstT5 + Foldseek) |
-| Storage | 50 GB | 200 GB (databases ~80 GB) |
+| RAM | 32 GB | 64 GB |
+| GPU | — | NVIDIA GPU (Phold ProstT5 + Foldseek) |
+| Storage | 100 GB | 250 GB (databases ~80 GB) |
 
 ### Software
 
-- Linux (Ubuntu 20.04+ recommended)
+- Linux (Ubuntu 20.04+)
 - conda / mamba ≥ 23.x
 - CUDA ≥ 11.8 (optional, for `phold --foldseek_gpu`)
 
@@ -152,28 +157,26 @@ Raw reads (PE150 Illumina)
 git clone https://github.com/fcabezasmera/PhageFlow.git
 cd PhageFlow
 
-# Create environment (large — ~80 tools, ~8 GB)
+# Create environment
 mamba env create -f environment.yml
 conda activate phageflow
 
-# Install PhageFlow package (editable mode for development)
+# Install PhageFlow (editable mode)
 pip install -e .
 
-# Verify installation
-phageflow check-tools
+# Verify
+phageflow --version
 ```
 
-> **samtools version conflict**: if `abricate` or `blast-legacy` are present,
-> force samtools ≥ 1.15 (required for `samtools fastq -N`):
-> ```bash
-> mamba install -n phageflow "samtools>=1.15"
-> ```
+> **Note on dependencies**: RGI and bacphlip are incompatible with the phageflow
+> environment (Python 3.11 + samtools ≥1.23 conflict). PhageFlow uses Phold's
+> built-in CARD and VFDB databases instead.
 
 ---
 
 ## Database Setup
 
-PhageFlow requires several external databases. All paths are configured in `config/config.yaml` under the `databases:` section.
+All paths are set in `config/config.yaml` under `databases:`.
 
 ### CheckV (~2 GB)
 
@@ -181,15 +184,11 @@ PhageFlow requires several external databases. All paths are configured in `conf
 checkv download_database databases/checkv_db
 ```
 
-Default path: `databases/checkv_db/checkv-db-v1.5`
-
 ### geNomad (~7 GB)
 
 ```bash
 genomad download-database databases/genomad_db
 ```
-
-Default path: `databases/genomad_db`
 
 ### Pharokka (~2 GB)
 
@@ -197,107 +196,94 @@ Default path: `databases/genomad_db`
 install_databases.py -o databases/pharokka_db
 ```
 
-Default path: `databases/pharokka_db`
-
-### Phold (~18 GB with ESM2 embeddings)
+### Phold (~18 GB)
 
 ```bash
 phold install -d databases/phold_db
 ```
 
-Default path: `databases/phold_db`
+### Kraken2 (optional, ~16 GB standard)
 
-### Phynteny Transformer (~1 GB)
-
-```bash
-phynteny_transformer install -d databases/phynteny_db
-```
-
-Default path: `databases/phynteny_db`
-
-### Kraken2 (optional, for classification-based host removal)
-
-Download a pre-built database from [https://benlangmead.github.io/aws-indexes/k2](https://benlangmead.github.io/aws-indexes/k2). Set `databases.kraken2` in config.yaml.
+Download from [https://benlangmead.github.io/aws-indexes/k2](https://benlangmead.github.io/aws-indexes/k2).  
+Set `databases.kraken2` in config.yaml.
 
 ---
 
 ## Quick Start
 
-### 1. Initialize a project
+### Run the full pipeline
 
 ```bash
-phageflow init /path/to/myproject
-```
-
-This creates the project structure:
-```
-myproject/
-  config/config.yaml   ← edit this
-  raw/                 ← place your FASTQ files here
-  results/             ← pipeline outputs (auto-created)
-  reports/             ← logs, TSVs, HTML reports (auto-created)
-```
-
-### 2. Place FASTQ files and edit config
-
-```bash
-cp /path/to/reads/*.fastq.gz /path/to/myproject/raw/
-
-# Edit database paths and thread count
-nano /path/to/myproject/config/config.yaml
-```
-
-### 3. Run the full pipeline
-
-```bash
-# Auto-detect samples from raw/, download host genome from NCBI
+# Purified phage — bwa-mem2 with NCBI accession (recommended)
 phageflow run \
-    --project /path/to/myproject \
-    --accessions GCF_000005845.2   # propagation host accession
+    --r1 raw/sample_R1.fastq.gz \
+    --r2 raw/sample_R2.fastq.gz \
+    --accessions GCF_000005845.2 \
+    -o results/
 
-# Multiple hosts
+# Multiple host accessions
 phageflow run \
-    --project /path/to/myproject \
-    --accessions GCF_000005845.2,GCF_000013425.1
+    --r1 raw/sample_R1.fastq.gz \
+    --r2 raw/sample_R2.fastq.gz \
+    --accessions GCF_000005845.2,GCF_000013425.1 \
+    -o results/
+
+# Virome / metagenome — Kraken2 mode (no accession needed)
+phageflow run \
+    --r1 raw/sample_R1.fastq.gz \
+    --r2 raw/sample_R2.fastq.gz \
+    -o results/
+
+# Resume from a specific module
+phageflow run \
+    --r1 raw/sample_R1.fastq.gz \
+    --r2 raw/sample_R2.fastq.gz \
+    --accessions GCF_000005845.2 \
+    -o results/ \
+    --from-module quality
 ```
 
-### 4. Run individual modules
+### Run individual modules
 
 ```bash
 phageflow qc \
-    --r1 raw/sample_R1.fastq.gz \
-    --r2 raw/sample_R2.fastq.gz
+    --r1 raw/sample_R1.fastq.gz --r2 raw/sample_R2.fastq.gz \
+    -o results/
 
 phageflow host-removal \
     --r1 results/01_qc/sample_R1.fastq.gz \
     --r2 results/01_qc/sample_R2.fastq.gz \
-    --accessions GCF_000005845.2
+    --accessions GCF_000005845.2 \
+    -o results/
 
 phageflow assembly \
     --r1 results/02_host_removal/sample_R1.fastq.gz \
     --r2 results/02_host_removal/sample_R2.fastq.gz \
-    --s1 results/02_host_removal/sample_singletons.fastq.gz
+    --s1 results/02_host_removal/sample_singletons.fastq.gz \
+    -o results/
+
+phageflow coverage \
+    --r1 results/02_host_removal/sample_R1.fastq.gz \
+    --r2 results/02_host_removal/sample_R2.fastq.gz \
+    --contigs results/03_assembly/sample_contigs.fasta \
+    -o results/
 
 phageflow viral-id \
-    --contigs results/03_assembly/sample_contigs.fasta
+    --contigs results/03_assembly/sample_contigs.fasta \
+    -o results/
 
 phageflow quality \
-    --virus-fna results/04_viral_id/sample_virus.fna
+    --virus-fna results/04_viral_id/sample_virus.fna \
+    -o results/
 
 phageflow annotate \
-    --genome results/05_quality/sample/annotation_ready/phages/Drexlerviridae_candidate_001.fasta
-```
+    --genome results/05_quality/sample/annotation_ready/phages/Ackermannviridae_candidate_001.fasta \
+    -o results/
 
-### 5. Resume an interrupted run
-
-```bash
-phageflow run --project /path/to/myproject --from-module quality
-```
-
-### 6. Check pipeline status
-
-```bash
-phageflow status --project /path/to/myproject
+phageflow resistance \
+    --candidate-id Ackermannviridae_candidate_001 \
+    --sample-id sample \
+    -o results/
 ```
 
 ---
@@ -306,437 +292,279 @@ phageflow status --project /path/to/myproject
 
 ### Module 01: Quality Control
 
-**Command**: `phageflow qc`
+**Command**: `phageflow qc` | **Tools**: fastp · FastQC · MultiQC
 
-**Tools**: fastp · FastQC · MultiQC
+Adapter trimming, quality filtering, PE overlap correction, poly-X removal, and low-complexity filtering. Automatically detects read length (PE150/250/300) and adjusts parameters accordingly.
 
-Performs adapter trimming, quality filtering, paired-end overlap correction, poly-X tail removal, and low-complexity filtering. Runs FastQC on trimmed reads (R1+R2 in parallel) and aggregates results with MultiQC.
+#### Read-length adaptive parameters
 
-#### fastp parameters
+| Parameter | PE150 | PE250 | PE300 | Rationale |
+|-----------|-------|-------|-------|-----------|
+| `length_required` | 50 bp | 75 bp | 100 bp | ~1/3 read length minimum post-trim |
+| `overlap_len_require` | 15 bp | 30 bp | 50 bp | Proportional to expected overlap |
+| `cut_right_window_size` | 4 bp | 6 bp | 8 bp | Smooths quality variation in longer reads |
+
+#### Fixed parameters
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| `--detect_adapter_for_pe` | auto | Automatic adapter detection (Chen et al. 2018) |
-| `--correction` | enabled | PE overlap-based base error correction |
-| `--overlap_len_require` | 10 bp | Minimum overlap for correction |
-| `--overlap_diff_percent_limit` | 10% | Max mismatch rate in overlap |
-| `--cut_right` | enabled | Sliding-window 3′ quality trimming (Bolger et al. 2014) |
-| `--cut_right_window_size` | 4 bp | Window size for sliding-window trimming |
-| `--cut_right_mean_quality` | Q20 | Quality floor for sliding-window trimming |
-| `--qualified_quality_phred` | 20 | Per-base quality threshold (99% accuracy) |
-| `--unqualified_percent_limit` | 10% | Max fraction of low-quality bases per read |
-| `--average_qual` | 20 | Read-level mean quality floor |
-| `--n_base_limit` | 5 | Max N calls per read |
-| `--length_required` | 75 bp | Minimum read length for PE150 |
-| `--low_complexity_filter` | enabled | Removes homopolymer reads (Roux et al. 2019) |
-| `--complexity_threshold` | 15% | Minimum sequence complexity |
-| `--trim_poly_x` | enabled | Poly-X tail removal (targets NextSeq/NovaSeq poly-G) |
-| `--poly_x_min_len` | 10 bp | Minimum poly-X length to trigger trimming |
+| `average_qual` | Q20 | MIUViG minimum (Roux et al. 2019) |
+| `qualified_quality_phred` | Q25 | 99.7% per-base accuracy |
+| `unqualified_percent_limit` | 15% | Lenient to retain divergent-phage reads |
+| `low_complexity_filter` | enabled | Removes homopolymers (Roux et al. 2019 MIUViG §2.1) |
+| `complexity_threshold` | 20% | Conservative filter |
+| `trim_poly_x` | enabled | NovaSeq/NextSeq 2-color poly-G artefacts |
 
-> **Note on duplication**: fastp uses k-mer sampling, not coordinate-based deduplication. At high phage coverage (100–5000×), apparent duplication rates of 50–70% are normal (Head et al. 2014). PhageFlow does NOT deduplicate reads.
-
-#### Thresholds and warnings
-
-| Metric | Warning level | Notes |
-|--------|--------------|-------|
-| Pass rate | < 75% | Expected 75–85% with strict HQ filters (Wick & Holt 2022) |
-| Q30 rate | < 75% | Assembly contiguity may be affected |
-| Total reads after filtering | < 50,000 | Minimum for 50× coverage on 150 kb genome |
-| Duplication rate | > 70% | Normal at high phage coverage; informational only |
-
-#### Outputs
-
-```
-results/01_qc/
-    {sample}_R1.fastq.gz      ← trimmed reads
-    {sample}_R2.fastq.gz
-
-reports/01_qc/{sample}/
-    {sample}_fastp.json        ← raw metrics (parsed by downstream modules)
-    {sample}_fastp.html        ← fastp HTML report
-    {sample}_R1_fastqc.html    ← FastQC per-read report
-    {sample}_R2_fastqc.html
-    multiqc/multiqc_qc.html    ← aggregated QC report
-    qc_summary.tsv             ← structured metrics TSV
-```
+> **Duplication note**: high duplication (>50%) is expected in purified phage preparations
+> at high coverage. Reads are NOT deduplicated (Head et al. 2014, Biotechniques 56:61).
 
 ---
 
 ### Module 02: Host Read Removal
 
-**Command**: `phageflow host-removal`
+**Command**: `phageflow host-removal` | **Tools**: bwa-mem2 · samtools ≥1.15 OR Kraken2 · seqtk
 
-**Tools**: bwa-mem2 · samtools ≥ 1.15 (primary) or Kraken2 · seqtk (alternative)
+#### bwa-mem2 mode (recommended)
 
-Removes host reads from the phage preparation. The primary mode uses alignment-based removal (bwa-mem2), which is more specific than k-mer classification and correctly identifies and retains DTR/ITR boundary reads as singletons for downstream assembly.
-
-#### bwa-mem2 mode (default, recommended)
+Permissive alignment parameters for divergent host strain detection:
 
 ```
-bwa-mem2 mem | samtools view -bF 2304 | samtools sort -n | samtools fastq
-    -f 4 -F 256    → unmapped reads (phage)
-    -1/-2          → both unmapped → phage pairs
-    -s             → one unmapped  → DTR/ITR singletons → SPAdes --s1
-    -0 /dev/null   → mapped (host) → discard
+bwa-mem2 mem -A 1 -B 2 -O 2,2 -M | samtools view -bF 2304 | samtools sort -n |
+samtools fastq -f 4 -F 256 -1 R1_out -2 R2_out -s singletons
 ```
 
-The streaming pipeline avoids writing a BAM file to disk. The `-F 2304` flag excludes secondary and supplementary alignments. Singleton recovery is critical for phages with DTR/ITR termini — these reads span the junction between the end and start of the linear/circular map and are discarded by paired-mode tools (Nayfach et al. 2021).
+`-A 1 -B 2 -O 2,2`: lower mismatch/gap penalties capture divergent host strains
+that default parameters would miss (Schmieder & Edwards 2011, Bioinformatics 27:863).
 
-**Host references** can be provided as:
-- NCBI accession(s): `--accessions GCF_000005845.2` (auto-downloaded via `datasets`)
-- Local FASTA: `--host-file /path/to/host.fasta`
-- Folder of FASTAs: `--host-file /path/to/genomes/`
-- Text file of paths: `--host-file paths.txt`
+Singletons (one mate maps to host, one does not) are retained → passed to SPAdes `--s1`.
+These bridge terminal repeat junctions (DTR/ITR) in circular viral genomes.
 
-Multiple accessions are concatenated into a single combined reference for one-pass alignment.
+Host references: NCBI accession (`--accessions`), local FASTA (`--host-file`), or both.
 
 #### Kraken2 mode (alternative)
 
-Used when no reference genome is available. Retains unclassified reads + all viral reads (taxid 10239).
-
-> **Limitation**: Kraken2 paired mode discards singletons at DTR/ITR boundaries. Enable `kraken2_postfilter: true` in config.yaml to add a bwa-mem2 post-filter step that recovers these reads.
+Used when no host genome is available. Retains unclassified + viral reads (taxid 10239).
+Parameters: `--confidence 0.5 --minimum-hit-groups 3` (strict, prevents false-positive
+host classification of divergent viral sequences; Wood et al. 2019, Genome Biol 20:257).
 
 #### Level A contamination check
 
-After bwa-mem2 removal, a subsample of 50,000 phage reads is classified with Kraken2 as a diagnostic. Any bacterial genus > 5% (configurable via `contamination_warn_pct`) triggers a warning. Reads are NOT removed — this is diagnostic only.
-
-#### Outputs
-
-```
-results/02_host_removal/
-    {sample}_R1.fastq.gz          ← phage paired reads
-    {sample}_R2.fastq.gz
-    {sample}_singletons.fastq.gz  ← DTR/ITR boundary reads
-
-reports/02_host_removal/{sample}/
-    host_genomes/
-        combined_hosts.fasta      ← concatenated reference
-        combined_hosts.fasta.*    ← bwa-mem2 index
-    {sample}_levelA_contamination.report  ← Kraken2 diagnostic (if DB configured)
-    host_removal_summary.tsv
-    {sample}_host_removal.log
-```
+Post-bwa-mem2 diagnostic: 50,000 phage reads classified by Kraken2.
+Warns if bacterial fraction > `contamination_warn_pct` (default 5%). No reads removed.
 
 ---
 
 ### Module 03: De Novo Assembly
 
-**Command**: `phageflow assembly`
+**Command**: `phageflow assembly` | **Tools**: SPAdes · MEGAHIT · cd-hit-est
 
-**Tools**: SPAdes · MEGAHIT · cd-hit-est
+Dual-assembler strategy. SPAdes and MEGAHIT use different graph algorithms and produce
+complementary contig sets. Their union is deduplicated with cd-hit-est.
 
-Two-assembler strategy with non-redundant (NR) reduction. Both assemblers run independently; their contigs are combined, filtered by minimum length, and deduplicated with cd-hit-est.
+#### SPAdes
 
-#### SPAdes (primary)
+Standard mode (no `--isolate`, no `--meta`) — balanced for both pure and mixed samples.
+`--isolate` is not used because it discards low-coverage contigs, which would miss
+minority phages in mixed preparations.
+Singletons passed via `--s1` (DTR/ITR boundary recovery).
 
-```
-spades.py --pe1-1 R1 --pe1-2 R2 --s1 singletons
-          --isolate -k 21,33,55,77,99,127 --phred-offset 33
-```
+#### MEGAHIT
 
-`--isolate` is the recommended preset for high-coverage isolates. It disables BayesHammer error correction (unnecessary and harmful at >200× coverage, where it collapses real SNPs) and optimises graph construction for near-complete genomes (Prjibelski et al. 2020). The `--s1 singletons` flag passes DTR/ITR boundary reads recovered by host-removal, improving terminal coverage and CheckV Complete classification.
+`--min-count 2` filters sequencing errors. `--no-mercy` is NOT used — mercy k-mers
+retain divergent viral sequences at low coverage (Li et al. 2015).
 
-> **Important**: `--only-assembler` is implied by `--isolate` and must **not** be passed explicitly — SPAdes raises a compatibility error if both flags are provided.
+#### k-mer range auto-selection
 
-#### MEGAHIT (secondary)
+| Read length | SPAdes k-max | MEGAHIT k-max |
+|-------------|-------------|---------------|
+| PE150 | 127 (v4.x limit) | 127 |
+| PE250 | 127 | 241 |
+| PE300 | 127 | 281 |
 
-```
-megahit -1 R1 -2 R2 --k-list 21,33,55,77,99,127,141
-        --no-mercy --min-count 2 --min-contig-len 200
-```
+SPAdes v4.x hard limit: k ≤ 127. MEGAHIT supports k up to 255.
+k_max < read_length (Bankevich et al. 2012; Li et al. 2015).
 
-`--no-mercy` disables low-depth k-mer rescue, reducing chimeric contigs at high coverage. `--min-count 2` discards k-mers seen only once (sequencing errors). MEGAHIT does not support singleton input; singletons are omitted.
+---
 
-> **Note**: `--k-list` requires MEGAHIT ≥ 1.2.9. PhageFlow auto-detects the installed version and falls back to `--k-min/--k-max/--k-step` for older versions.
+### Module 03b: Coverage Profiling
 
-#### cd-hit-est NR reduction
+**Command**: `phageflow coverage` | **Tools**: CoverM
 
-```
-cd-hit-est -c 1.00 -aS 0.85 -n 8 -d 0 -M 0 -p 1
-```
+Per-contig coverage metrics before viral identification. Diagnostic only — no contigs removed.
 
-Removes exact duplicates and near-identical contigs (≥85% coverage at 100% identity). Reduces redundancy from assembler agreement on the same genomic region.
+| Metric | Description |
+|--------|-------------|
+| `mean` | Average depth across all positions |
+| `trimmed_mean` | 5–95% trimmed mean (robust to terminal repeat depth artefacts) |
+| `covered_bases` | Positions covered at ≥1x |
+| `variance` | Depth variance (CV = std/mean) |
 
-#### Warnings
-
-| Condition | Warning |
-|-----------|---------|
-| N50 < 5,000 bp | Fragmented assembly — check host removal and read depth |
-| Largest contig > 500,000 bp | Unusually large — possible host contamination or concatenated assembly |
-| Both assemblers fail | Pipeline aborts for this sample |
-
-#### Outputs
-
-```
-results/03_assembly/
-    {sample}_spades/
-        contigs.fasta           ← SPAdes contigs (scaffolds.fasta NOT used)
-        assembly_graph.gfa      ← assembly graph
-        spades.log
-    {sample}_megahit/
-        {sample}.contigs.fa     ← MEGAHIT contigs
-    {sample}_contigs.fasta      ← NR combined output → viral-id input
-
-reports/03_assembly/{sample}/
-    assembly_summary.tsv
-    {sample}_assembly.log
-```
-
-> **Why not scaffolds.fasta?** SPAdes scaffolds contain N-runs at gap positions. These break CheckV DTR/ITR detection (which requires an uninterrupted terminal repeat sequence) and interfere with genome circularity assessment.
+| Threshold | Value | Action |
+|-----------|-------|--------|
+| Low coverage | mean < 5x | WARN — possible assembly artefact |
+| Ultra-high coverage | mean > 1000x | WARN — possible concatemer |
+| Uneven depth | CV > 2.0 AND mean > 10x | WARN — possible chimera |
 
 ---
 
 ### Module 04: Viral Identification
 
-**Command**: `phageflow viral-id`
+**Command**: `phageflow viral-id` | **Tools**: geNomad
 
-**Tools**: geNomad
+#### Score thresholds
 
-Classifies contigs as viral or non-viral using geNomad's combined k-mer marker gene search (MMseqs2) and neural-network classifier. Extracts taxonomy, topology, and genetic code for each viral contig.
+| Tier | Score | Length | Action |
+|------|-------|--------|--------|
+| main | ≥ 0.7 | any | Viral (97% precision at this threshold) |
+| rescued | 0.4–0.7 | ≥ 3 kb | Novel lineage rescue (captures Microviridae/Inoviridae) |
+| discarded | < 0.4 | — | Not viral |
 
-#### geNomad flags
+Rescue threshold reduced to 3 kb (from 10 kb) to capture complete Microviridae
+(3–6 kb) and Inoviridae (6–9 kb) genomes (Roux et al. 2019 MIUViG).
 
-| Flag | Value | Rationale |
-|------|-------|-----------|
-| `--enable-score-calibration` | enabled | Adjusts scores for virome-dominated samples |
-| `--composition` | virome | Reduces false negatives for novel lineages |
-| `--lenient-taxonomy` | enabled | Resolves below family rank (genus, species) |
-| `--disable-find-proviruses` | enabled | Proviruses not expected in purified preps |
-| `--sensitivity` | 4.2 | Default MMseqs2 sensitivity |
-| `--cleanup` | enabled | Removes large `annotate/` intermediate directory |
+#### geNomad parameters
 
-#### Filtering tiers
-
-| Tier | Condition | Rationale |
-|------|-----------|-----------|
-| Main | `virus_score ≥ 0.7` | ~97% precision (Camargo et al. 2023) |
-| Rescued | `0.4 ≤ score < 0.7` AND `length ≥ 10 kb` | Novel lineages without DB relatives score 0.4–0.6 |
-| Discarded | Everything else | |
-
-#### Metadata propagated downstream
-
-| Field | Source | Used by |
-|-------|--------|---------|
-| `topology` | geNomad `_virus_summary.tsv` | quality.py → rename_map; annotate.py → plot mode, dnaapler |
-| `genetic_code` | geNomad (11=standard, 15=CrAss-like) | annotate.py → Pharokka `--genetic_code` |
-| `naming_level` | Taxonomy parse (family > finest > 'Phage') | quality.py → candidate file naming |
-
-#### Outputs
-
-```
-results/04_viral_id/
-    {sample}_virus.fna          ← viral contigs → quality input
-    {sample}_metadata.tsv       ← topology + genetic_code + score per contig
-
-reports/04_viral_id/{sample}/
-    genomad/
-        {stem}/
-            {stem}_virus_summary.tsv
-            {stem}_virus_genes.tsv
-    viral_id_summary.tsv
-    {sample}_viral_id.log
-```
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `composition` | auto | Auto-detects sample composition (Camargo et al. 2023) |
+| `sensitivity` | 4.2 | Maximum MMseqs2 sensitivity for hallmark detection |
+| `lenient_taxonomy` | true | Resolves classification below ICTV species boundary |
+| `disable_find_proviruses` | true | Post-host-removal contigs: provirus detection → false positives |
+| `min_score` | 0.7 | ~97% precision (Camargo et al. 2023, Suppl Fig 2) |
 
 ---
 
 ### Module 05: Genome Quality Assessment
 
-**Command**: `phageflow quality`
+**Command**: `phageflow quality` | **Tools**: CheckV · blastn · minimap2
 
-**Tools**: CheckV · mash · minimap2 (or cd-hit-est fallback)
+#### Quality tiers
 
-Evaluates viral contigs with CheckV, assigns quality tiers, dereplicates near-identical candidates, co-bins low-quality draft contigs by taxonomy, validates genome integrity with read recruitment coverage, and writes annotation-ready FASTAs.
+| Tier | Criterion | Output |
+|------|-----------|--------|
+| Complete | CheckV DTR/ITR detected | annotation_ready/ |
+| High-quality | completeness ≥ 90% | annotation_ready/ |
+| Medium-quality | completeness ≥ 50% (MIUViG standard) | annotation_ready/ |
+| large-ND | ND, length ≥ 20 kb, ≥1 viral gene | annotation_ready/ |
+| lq-draft | length ≥ 10 kb, ≥1 viral gene | drafts/ or bin-rescue |
+| bin-rescue | LQ drafts, same taxon, combined ≥ 30 kb | annotation_ready/ |
+| discarded | length < 1.5 kb or no viral genes | — |
 
-#### CheckV quality tiers
+#### Dereplication strategy
 
-| Tier | Condition | Output directory |
-|------|-----------|-----------------|
-| `complete` | CheckV = Complete (DTR or ITR detected) | `annotation_ready/phages/` |
-| `high-quality` | completeness ≥ 90% | `annotation_ready/phages/` |
-| `medium-quality` | completeness ≥ 50% (configurable) | `annotation_ready/phages/` |
-| `large-nd` | Not-determined, length ≥ 30 kb, ≥ 1 viral gene | `annotation_ready/phages/` |
-| `bin-rescue` | LQ drafts co-binned by taxonomy, combined ≥ 30 kb | `annotation_ready/phages/` |
-| `lq-draft` | length ≥ 10 kb, ≥ 1 viral gene | `drafts/` |
-| `discarded` | below all thresholds | not written |
+- **Large genomes (≥ 20 kb)**: blastn all-vs-all (ANI ≥ 95%, coverage ≥ 80%).
+  Detects non-overlapping fragments of the same genome that mash misses
+  (k-mer content is disjoint between non-overlapping regions).
+- **Circular rotation detection**: cumulative multi-hit blastn coverage ≥ 90% at
+  pident ≥ 95%. Catches SPAdes/MEGAHIT assemblies of the same circular genome
+  with different start positions.
+- **Small genomes (< 20 kb)**: minimap2 asm5 all-vs-all (identity ≥ 95%, coverage ≥ 80%).
+  mash is unreliable for small genomes (sparse sketch).
 
-#### Topology resolution (priority order)
+Threshold: 95% ANI = ICTV species boundary (Turner et al. 2021, Arch Virol 166:2633).
 
-CheckV `termini_type` takes precedence over geNomad topology because CheckV confirms terminal repeats in the actual assembled sequence (≥20 bp detected repeat), while geNomad predicts topology from sequence composition.
+#### Topology resolution
 
-```
-CheckV DTR   → topology = "DTR"  (circular, most tailed dsDNA phages)
-CheckV ITR   → topology = "ITR"  (linear with ITR, e.g. T7-like Autographiviridae)
-CheckV NA    → use geNomad topology as context ("No terminal repeats" or "NA")
-```
-
-#### Dereplication
-
-Applied to single-contig annotation_ready candidates only, at >98% ANI (Turner et al. 2021 ICTV species boundary = 95% ANI).
-
-| Genome size | Method |
-|-------------|--------|
-| ≥ 20 kb | mash distance (sketch size 10,000) |
-| < 20 kb | minimap2 asm5 all-vs-all (mash unreliable on small genomes) |
-| Fallback | cd-hit-est at 98% if neither available |
-
-#### Candidate naming scheme
-
-Candidates are named after their taxonomic level: `{naming_level}_candidate_{NNN}.fasta`
-
-Examples: `Drexlerviridae_candidate_001.fasta`, `Ackermannviridae_candidate_002.fasta`, `Phage_candidate_001.fasta` (unclassified)
-
-#### Coverage validation
-
-Post-assignment, phage reads are mapped back to annotation_ready candidates (bwa-mem2) to compute mean depth, breadth, and coefficient of variation (CV). Warnings are raised for:
-- Breadth < 95% (potential assembly gap or chimera)
-- CV > 1.5 (uneven coverage, possible concatemer)
-
-#### Outputs
-
-```
-results/05_quality/{sample}/
-    annotation_ready/phages/
-        {naming_level}_candidate_001.fasta   ← annotation input
-        {naming_level}_candidate_002.fasta
-    drafts/
-        {naming_level}_draft_001.fasta       ← low-quality candidates
-    checkv/
-        quality_summary.tsv
-        contamination.tsv
-        completeness.tsv
-
-reports/05_quality/{sample}/
-    rename_map.tsv          ← contig→candidate with full metadata
-    quality_summary.tsv
-    coverage/
-        depth.tsv
-    {sample}_quality.log
-```
-
----
-
-### Module 05b: Assembly Refinement (Optional)
-
-**Command**: `phageflow assembly-refine`
-
-Run **after** `quality` when annotation_ready contains fragmented assemblies (MQ candidates, multiple candidates from same family, breadth < 95%).
-
-**Strategy**: extracts reads that do not map to existing candidates (unmapped pairs) and reads that bridge a candidate end and a gap (semi-mapped "bridge" reads), then re-assembles with SPAdes using `--trusted-contigs` to anchor the graph at known correct sequences and extend through gaps.
-
-```bash
-phageflow assembly-refine \
-    --r1 results/02_host_removal/sample_R1.fastq.gz \
-    --r2 results/02_host_removal/sample_R2.fastq.gz \
-    --s1 results/02_host_removal/sample_singletons.fastq.gz
-```
-
-Refined candidates replace originals when CheckV quality tier is strictly higher or genome is ≥10% longer at equal tier. Original candidates are backed up to `annotation_ready/phages/pre_refine/`.
+CheckV termini_type takes precedence over geNomad topology:
+CheckV confirms DTR/ITR in the actual assembled sequence (≥20 bp repeat), whereas
+geNomad predicts topology from sequence composition.
 
 ---
 
 ### Module 06: Structural Annotation
 
-**Command**: `phageflow annotate`
+**Command**: `phageflow annotate` | **Tools**: Pharokka · Phold · dnaapler
 
-**Tools**: Pharokka → Phold → Phynteny Transformer
+#### Two-tier cascade
 
-Three-tier annotation cascade with per-CDS delta tracking from tool TSVs.
+**Tier 1 — Pharokka** (sequence-based):
+- Gene calling: PHANOTATE (single-contig) or prodigal-gv (multi-contig)
+- Database search: MMseqs2 + PyHMMER vs PHROGs
+- Reorientation: dnaapler (single-contig only — finds terL, sets canonical origin)
+- Genetic code: read from genome FASTA header `[genetic_code=N]` (set by Module 04)
+  CrAss-like phages use code 15 (TGA=Trp); passed as `--coding_table` to Pharokka
 
-#### Tier 1: Pharokka
+**Tier 2 — Phold** (structure-based):
+- `--hyps`: upgrades hypothetical proteins from Pharokka only (conservative)
+- ProstT5 generates 3Di structural tokens from amino acid sequence
+- Foldseek searches PHROGs-3D, CARD, VFDB, DefenseFinder, NetFlax
+- `--finetune`: phage-finetuned ProstT5 (better 3Di quality for phage proteins)
 
-Gene calling with PHANOTATE (single-contig) or prodigal-gv (multi-contig), PHROGs database search via MMseqs2 and PyHMMER. For single-contig genomes, `--dnaapler` reorients the sequence to canonical origin (terminase large subunit). For multi-contig genomes, `--meta --meta_hmm` are used; `--dnaapler` is not added (incompatible with meta mode).
+**Why `--hyps` outperforms full re-annotation:**
+Phold full mode can downgrade high-confidence Pharokka MMseqs2 hits when structural
+evidence is ambiguous. `--hyps` preserves confident sequence-based annotations and
+applies structure-based annotation only where Pharokka found no evidence.
 
-#### Tier 2: Phold
+#### Visualisation
 
-Structure-based functional annotation via ProstT5 (protein language model embeddings) + Foldseek (structural alignment). Upgrades hypothetical proteins from Tier 1 by finding structural homologs with known function. Key flags: `--hyps` (process hypothetical proteins only), `--finetune` (phage-finetuned ProstT5 model), `--foldseek_gpu` (GPU acceleration).
+| Genome type | Plot tool | Output |
+|-------------|-----------|--------|
+| Single-contig (circular/complete) | phold plot | Circular map, PNG + SVG |
+| Multi-contig (fragmented) | pyGenomeViz | Linear multi-track, PNG + SVG |
 
-`annotation_confidence` (high / medium / low) is the primary quality indicator per phold documentation.
+---
 
-#### Tier 3: Phynteny Transformer
+### Module 07: Resistance and Biosafety Screening
 
-Synteny-aware functional prediction using Transformer + ESM2. Adds `/phynteny_category`, `/phynteny_score`, `/phynteny_confidence` qualifiers to the GBK. Does NOT modify `/product` — predictions are additive.
+**Command**: `phageflow resistance` | **Tools**: none (parses Pharokka + Phold outputs)
 
-> **Important**: The per-CDS TSV output filename contains a confirmed typo in the tool: `phynteny_per_cds_funcions.tsv` (not `functions`). PhageFlow handles this with a fallback search.
+No additional tools required. Parses existing annotation outputs from Module 06.
 
-#### Plot strategy
+#### Data sources
 
-| Genome | Method | Rationale |
-|--------|--------|-----------|
-| Single-contig | phold plot (circular PNG + SVG) | Reads `/product`, Foldseek qualifiers, confidence |
-| Multi-contig | pyGenomeViz (linear multi-track) | Single figure for all contigs; phold generates N separate maps |
+| Category | Source | Method |
+|----------|--------|--------|
+| AMR (CARD) | Pharokka merged TSV | MMseqs2 sequence search |
+| AMR (CARD) | Phold sub_db_tophits | Foldseek structural search |
+| Virulence (VFDB) | Pharokka merged TSV | MMseqs2 sequence search |
+| Virulence (VFDB) | Phold sub_db_tophits | Foldseek structural search |
+| Anti-CRISPR (ACR) | Phold sub_db_tophits | Foldseek (fident ≥ 20%) |
+| Defense systems | Phold sub_db_tophits | Foldseek structural search |
+| Toxin-antitoxin | Phold sub_db_tophits | Foldseek structural search |
 
-#### Delta tracking
+#### Confidence levels
 
-All three tier TSVs are joined on `locus_tag` to produce a `{candidate_id}_delta_report.tsv` recording which tier annotated each CDS and the full evidence chain.
+| Level | Criterion |
+|-------|-----------|
+| HIGH | Detected by BOTH Pharokka (sequence) AND Phold (structure) |
+| MEDIUM | Pharokka sequence search only |
+| LOW | Phold structure search only |
 
-#### Outputs
+`biosafety_flag: YES` is raised only for AMR or virulence hits. ACR, defense, and
+toxin-antitoxin are informational (relevant for phage-host interaction interpretation).
 
-```
-results/06_annotation/{candidate_id}/
-    pharokka/
-        {candidate_id}.gbk      ← Tier 1 GBK
-        {candidate_id}.gff      ← GFF3 for external tools
-        {candidate_id}_cds_final_merged_output.tsv
-    phold/
-        {candidate_id}.gbk      ← Tier 2 GBK (canonical output)
-        {candidate_id}_per_cds_predictions.tsv
-    phynteny/
-        phynteny_transformer.gbk  ← Tier 3 GBK (/phynteny_* only)
-        phynteny_per_cds_funcions.tsv
-    plots/
-        {candidate_id}.png      ← circular or linear genome map
-        {candidate_id}.svg
-
-reports/06_annotation/
-    annotation_summary.tsv      ← aggregate stats across all candidates
-    {candidate_id}/
-        {candidate_id}_delta_report.tsv
-        {candidate_id}_pharokka.log
-        {candidate_id}_phold.log
-        {candidate_id}_phynteny.log
-        {candidate_id}_plot.log
-```
+ACR-specific thresholds (fident ≥ 20%, qcov ≥ 35%): anti-CRISPR proteins are among
+the most sequence-divergent phage proteins; structural homology at low sequence
+identity is biologically meaningful (Pawluk et al. 2016, Science 351:aad8405).
 
 ---
 
 ## Configuration Reference
 
-All parameters are set in `config/config.yaml`. Run `phageflow config` to generate a template.
-
 ### QC (`qc:`)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `average_qual` | 20 | fastp `--average_qual`: read-level mean quality floor |
-| `qualified_quality_phred` | 20 | Per-base quality threshold |
-| `unqualified_percent_limit` | 10 | Max % low-quality bases per read |
-| `length_required` | 75 | Minimum read length (bp) |
-| `cut_right_window_size` | 4 | Sliding-window size (bp) |
-| `cut_right_mean_quality` | 20 | Sliding-window quality floor |
+| `average_qual` | 20 | Read-level mean Q floor (MIUViG minimum) |
+| `qualified_quality_phred` | 25 | Per-base Q threshold |
+| `unqualified_percent_limit` | 15 | Max % low-Q bases per read |
+| `length_required` | 50 | Minimum post-trim length (PE150 default; auto-adjusted) |
+| `cut_right_window_size` | 4 | Sliding-window size (auto-adjusted by read length) |
+| `cut_right_mean_quality` | 25 | Sliding-window quality floor |
 | `correction` | true | PE overlap correction |
-| `overlap_len_require` | 10 | Minimum overlap for PE correction (bp) |
-| `low_complexity_filter` | true | Enable low-complexity filter |
-| `complexity_threshold` | 15 | Minimum complexity (%) |
+| `overlap_len_require` | 15 | Min overlap for PE correction (auto-adjusted) |
+| `low_complexity_filter` | true | Homopolymer filter |
+| `complexity_threshold` | 20 | Minimum complexity (%) |
 | `trim_poly_x` | true | Poly-X tail removal |
-| `poly_x_min_len` | 10 | Minimum poly-X length to trim (bp) |
+| `poly_x_min_len` | 10 | Min poly-X length to trigger |
 | `n_base_limit` | 5 | Max N calls per read |
-
-### Host Removal (`host_removal:`)
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `always_include_accessions` | `[]` | NCBI accessions always added to host reference |
-| `contamination_warn_pct` | 5.0 | Level A warning threshold (% bacterial reads) |
-| `kraken2_postfilter` | false | Enable bwa-mem2 post-filter after Kraken2 |
-| `postfilter_min_pct` | 1.0 | Minimum bacterial % to trigger Level B download |
 
 ### Assembly (`assembly:`)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `kmers` | `"21,33,55,77,99,127,141"` | k-mer sizes for SPAdes and MEGAHIT |
+| `kmers` | `"21,33,55,77,99,127"` | Base k-mer list (SPAdes max=127; MEGAHIT extended automatically) |
 | `min_length` | 200 | Minimum contig length (bp) for NR pool |
-| `iterative_refinement` | false | Run assembly-refine automatically after quality |
 
 ### Viral Identification (`genomad:`)
 
@@ -744,23 +572,24 @@ All parameters are set in `config/config.yaml`. Run `phageflow config` to genera
 |-----------|---------|-------------|
 | `min_score` | 0.7 | Primary viral score threshold (~97% precision) |
 | `rescue_min_score` | 0.4 | Lower threshold for rescue tier |
-| `rescue_min_length_bp` | 10000 | Minimum length for rescue tier (bp) |
-| `sensitivity` | 4.2 | MMseqs2 search sensitivity |
-| `enable_score_calibration` | true | Score calibration for virome samples |
-| `composition` | virome | Sample composition for calibration |
+| `rescue_min_length_bp` | 3000 | Minimum length for rescue (captures Microviridae) |
+| `sensitivity` | 4.2 | MMseqs2 sensitivity (maximum) |
+| `enable_score_calibration` | true | Score calibration by sample composition |
+| `composition` | auto | Auto-detects composition (Camargo et al. 2023) |
 | `lenient_taxonomy` | true | Resolve below family rank |
-| `disable_find_proviruses` | true | Skip provirus detection |
+| `disable_find_proviruses` | true | Skip provirus detection on post-host-removal contigs |
+| `min_virus_hallmarks` | 0 | Primary filter is score + rescue_length |
 
 ### Quality Assessment (`checkv:`)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `min_completeness` | 50 | MQ threshold (%) |
+| `min_completeness` | 50 | MQ threshold % (MIUViG standard) |
 | `min_viral_genes` | 1 | Minimum viral genes for draft rescue |
 | `length_rescue` | 10000 | Minimum length for LQ draft (bp) |
 | `min_contig_bp` | 1500 | Global minimum contig length (bp) |
-| `large_nd_rescue_bp` | 30000 | Length threshold for large-ND rescue (bp) |
-| `min_bin_rescue_bp` | 30000 | Combined length threshold for bin rescue (bp) |
+| `large_nd_rescue_bp` | 20000 | Length threshold for large-ND rescue (bp) |
+| `min_bin_rescue_bp` | 30000 | Combined length for bin rescue (bp) |
 | `max_kmer_freq` | 1.5 | Concatemer warning threshold |
 | `max_genome_copies` | 1.5 | Concatemer warning threshold |
 
@@ -768,19 +597,18 @@ All parameters are set in `config/config.yaml`. Run `phageflow config` to genera
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `phold_gpu` | true | Use `--foldseek_gpu` (disable for CPU-only nodes) |
+| `phold_gpu` | true | Use `--foldseek_gpu` (set false for CPU-only) |
 | `phold_finetune` | true | Phage-finetuned ProstT5 model |
 | `phold_batch_size` | 1 | ProstT5 batch size (increase on GPU: 4–8) |
 | `phold_sensitivity` | 9.5 | Foldseek sensitivity |
-| `phynteny_confidence` | 0.8 | Phynteny prediction confidence threshold |
-| `genetic_code` | 11 | Default genetic code (overridden per-sample from geNomad) |
+| `genetic_code` | 11 | Default genetic code (overridden per-genome from geNomad) |
 
 ---
 
 ## Output Structure
 
 ```
-<project>/
+<output_dir>/
 ├── results/
 │   ├── 01_qc/
 │   │   ├── {sample}_R1.fastq.gz
@@ -790,52 +618,56 @@ All parameters are set in `config/config.yaml`. Run `phageflow config` to genera
 │   │   ├── {sample}_R2.fastq.gz
 │   │   └── {sample}_singletons.fastq.gz
 │   ├── 03_assembly/
-│   │   ├── {sample}_spades/
-│   │   ├── {sample}_megahit/
-│   │   └── {sample}_contigs.fasta         ← NR combined contigs
+│   │   ├── {sample}_spades/contigs.fasta
+│   │   ├── {sample}_megahit/{sample}.contigs.fa
+│   │   └── {sample}_contigs.fasta          ← NR combined contigs
+│   ├── 03b_coverage/{sample}/
+│   │   └── {sample}_coverage.tsv           ← per-contig metrics
 │   ├── 04_viral_id/
-│   │   ├── {sample}_virus.fna             ← viral contigs
-│   │   └── {sample}_metadata.tsv          ← topology + genetic_code
-│   ├── 05_quality/
-│   │   └── {sample}/
-│   │       ├── annotation_ready/
-│   │       │   └── phages/
-│   │       │       └── {naming_level}_candidate_NNN.fasta   ← annotation input
-│   │       ├── drafts/
-│   │       └── checkv/
-│   └── 06_annotation/
-│       └── {candidate_id}/
-│           ├── pharokka/                  ← Tier 1 (Pharokka)
-│           ├── phold/                     ← Tier 2 (Phold) ← canonical GBK
-│           ├── phynteny/                  ← Tier 3 (Phynteny)
-│           └── plots/                     ← genome map (PNG + SVG)
+│   │   ├── {sample}_virus.fna              ← viral contigs
+│   │   └── {sample}_metadata.tsv           ← topology + genetic_code
+│   ├── 05_quality/{sample}/
+│   │   ├── annotation_ready/phages/
+│   │   │   └── {naming_level}_candidate_NNN.fasta
+│   │   ├── drafts/
+│   │   └── checkv/
+│   ├── 06_annotation/{candidate_id}/
+│   │   ├── pharokka/                       ← Tier 1 (GBK + TSVs)
+│   │   ├── phold/                          ← Tier 2 (canonical GBK)
+│   │   └── plots/                          ← genome map (PNG + SVG)
+│   └── 07_resistance/{candidate_id}/
+│       ├── {candidate_id}_amr.tsv
+│       ├── {candidate_id}_virulence.tsv
+│       ├── {candidate_id}_acr.tsv
+│       ├── {candidate_id}_defense.tsv
+│       └── {candidate_id}_toxin_antitoxin.tsv
 └── reports/
-    ├── 01_qc/{sample}/
-    │   ├── {sample}_fastp.json
-    │   ├── {sample}_fastp.html
-    │   ├── multiqc/multiqc_qc.html
-    │   └── qc_summary.tsv
-    ├── 02_host_removal/{sample}/
-    ├── 03_assembly/{sample}/
-    ├── 04_viral_id/{sample}/
+    ├── 01_qc/{sample}/qc_summary.tsv
+    ├── 02_host_removal/{sample}/host_removal_summary.tsv
+    ├── 03_assembly/{sample}/assembly_summary.tsv
+    ├── 03b_coverage/{sample}/coverage_summary.tsv
+    ├── 04_viral_id/{sample}/viral_id_summary.tsv
     ├── 05_quality/{sample}/
-    │   └── rename_map.tsv                 ← critical metadata link
+    │   └── rename_map.tsv                  ← critical metadata link
     ├── 06_annotation/
-    │   ├── annotation_summary.tsv         ← aggregate (all candidates)
+    │   ├── annotation_summary.tsv          ← aggregate (all candidates)
     │   └── {candidate_id}/
     │       └── {candidate_id}_delta_report.tsv
-    └── pipeline_status.tsv                ← module completion tracking
+    └── 07_resistance/
+        ├── resistance_aggregate.tsv        ← all candidates
+        └── {candidate_id}/{candidate_id}_resistance_summary.tsv
 ```
 
 ### Key files for downstream use
 
-| File | Description | Used for |
-|------|-------------|----------|
-| `results/05_quality/{sample}/annotation_ready/phages/*.fasta` | Annotation-ready candidate genomes | Annotate, safety screening, NCBI submission |
-| `reports/05_quality/{sample}/rename_map.tsv` | Full metadata per contig (topology, completeness, genetic_code) | Interpreting annotation results |
-| `results/06_annotation/{candidate}/phold/{candidate}.gbk` | Canonical annotated GenBank (Tier 2) | Genome browser, comparative genomics |
-| `reports/06_annotation/annotation_summary.tsv` | Per-candidate annotation statistics | Manuscript preparation |
-| `reports/06_annotation/{candidate}/{candidate}_delta_report.tsv` | Per-CDS annotation provenance | Quality filtering, functional analysis |
+| File | Description |
+|------|-------------|
+| `results/05_quality/{sample}/annotation_ready/phages/*.fasta` | Annotation-ready genomes |
+| `reports/05_quality/{sample}/rename_map.tsv` | Full metadata per contig |
+| `results/06_annotation/{candidate}/phold/{candidate}.gbk` | Canonical annotated GBK |
+| `reports/06_annotation/annotation_summary.tsv` | Annotation statistics |
+| `reports/06_annotation/{candidate}/{candidate}_delta_report.tsv` | Per-CDS provenance |
+| `reports/07_resistance/resistance_aggregate.tsv` | Biosafety summary all candidates |
 
 ---
 
@@ -845,68 +677,115 @@ All parameters are set in `config/config.yaml`. Run `phageflow config` to genera
 phageflow [OPTIONS] COMMAND [ARGS]
 
 Commands:
-  qc               Quality control and trimming (fastp + FastQC + MultiQC)
-  host-removal     Remove host reads (bwa-mem2 or Kraken2)
-  assembly         De novo assembly (SPAdes + MEGAHIT + cd-hit-est)
-  assembly-refine  Iterative assembly refinement (optional; after quality)
-  viral-id         Viral identification (geNomad)
-  quality          Genome quality and selection (CheckV)
-  annotate         Structural annotation (Pharokka → Phold → Phynteny)
-  safety           Biosafety screening (CARD + VFDB)
-  report           Generate final HTML report per candidate genome
-  run              Execute all modules for all samples in a directory
-  check-tools      Verify all required tools are installed
-  config           Copy default config.yaml template
-  init             Initialise a new project directory
-  status           Show pipeline status for all samples in a project
+  qc            Quality control and trimming (fastp + FastQC + MultiQC)
+  host-removal  Remove host reads (bwa-mem2 or Kraken2)
+  assembly      De novo assembly (SPAdes + MEGAHIT + cd-hit-est)
+  coverage      Coverage profiling (CoverM)
+  viral-id      Viral identification (geNomad)
+  quality       Genome quality and selection (CheckV)
+  annotate      Structural annotation (Pharokka → Phold)
+  resistance    AMR + virulence + ACR + defense screening
+  run           Execute full pipeline for one or more samples
+  config        Copy default config.yaml template
+  init          Initialise a new project directory
 
 Options (all commands):
-  -c, --config     Path to config.yaml [default: config/config.yaml]
-  -w, --workdir    Pipeline working directory
-  -o, --output-dir Base output directory (results/ and reports/ created inside)
-  --reports-dir    Override reports directory independently of -o
-  -t, --threads    CPU threads [default: auto 90% of logical CPUs]
-  --force          Force re-run even if outputs already exist
-  --project        Project directory (from phageflow init); overrides --config/--workdir
+  -c, --config       Path to config.yaml [default: config/config.yaml]
+  -w, --workdir      Pipeline working directory
+  -o, --output-dir   Base output directory
+  --reports-dir      Override reports directory
+  -t, --threads      CPU threads [default: auto 90% of logical CPUs]
+  --force            Force re-run even if outputs exist
+
+Options (run only):
+  --r1               R1 FASTQ path (repeatable for multiple samples)
+  --r2               R2 FASTQ path (repeatable for multiple samples)
+  --raw-dir          Directory to scan for paired FASTQ files
+  --accessions       NCBI genome accession(s) for host removal (comma-separated)
+  --host-file        Local host FASTA or folder of FASTAs
+  --from-module      Resume from module: qc|host-removal|assembly|coverage|
+                     viral-id|quality|annotate|resistance
 ```
 
 ---
 
 ## Scientific Basis
 
-Methodological decisions are documented inline in each module. Key decisions:
+**No composition assumptions before Module 04**
+Modules 01–03 treat reads as unknown composition. The non-host fraction may be viral,
+plasmid, bacterial (residual), or chimeric. Viral identification is performed after
+assembly, not before — this ensures that even highly divergent phages with no database
+reference are assembled and passed to geNomad for classification.
 
-**Why SPAdes `--isolate`?**
-At >200× coverage, BayesHammer error correction collapses real SNPs and introduces artefacts in the assembly graph. The `--isolate` preset disables correction entirely and is optimised for near-complete genomes (Prjibelski et al. 2020).
+**bwa-mem2 permissive parameters for host removal**
+Default BWA parameters are optimised for variant calling (high specificity). Host removal
+requires high sensitivity — divergent host strains that default parameters miss will
+appear as false non-host signal. Parameters `-A 1 -B 2 -O 2,2` lower the mismatch/gap
+penalties to capture divergent host sequences (Schmieder & Edwards 2011).
 
-**Why retain singletons?**
-Reads spanning the junction of a circular genome map to both ends of a linearised assembly. bwa-mem2 in paired mode discards these as unmapped mates; PhageFlow retains them as singletons and passes them to SPAdes via `--s1`. This improves terminal coverage and is critical for CheckV DTR/ITR detection and Complete classification (Nayfach et al. 2021).
+**SPAdes standard mode over --isolate**
+`--isolate` is optimised for single high-coverage isolates and discards low-coverage
+contigs. Mixed phage preparations or metagenomes may contain multiple viral genomes at
+variable coverage. Standard mode preserves low-coverage contigs and performs comparably
+on dominant high-coverage genomes (Bankevich et al. 2012).
 
-**Why CheckV over geNomad for topology?**
-geNomad predicts topology from k-mer composition; CheckV detects DTR/ITR in the actual assembled sequence with a repeat-finding algorithm requiring ≥20 bp confirmed repeat. CheckV topology is therefore more reliable for the assembly quality determination. PhageFlow uses CheckV as the authoritative source and geNomad as fallback.
+**blastn for dereplication of large viral genomes**
+mash k-mer sketches compare k-mer content between sequences. Non-overlapping fragments
+of the same circular genome have disjoint k-mer content → mash reports high distance
+even at 100% identity. blastn all-vs-all with cumulative multi-hit coverage correctly
+identifies these as the same genome.
 
-**Why three annotation tiers?**
-Pharokka (MMseqs2 + PyHMMER) annotates ~30–50% of CDS on first pass. Phold structure-based annotation upgrades an additional ~10–20% of hypothetical proteins by finding structural homologs regardless of sequence divergence. Phynteny adds synteny context to predict function for remaining unknowns. Each tier is tracked independently via per-CDS delta reports.
+**Circular rotation detection**
+SPAdes and MEGAHIT may assemble the same circular genome with different start positions.
+Both assemblies are 100% identical but produce two BLAST hits (each covering ~50% of
+the query) rather than one hit at 100% coverage. PhageFlow detects this by summing
+all aligned bases between a pair and checking if cumulative coverage ≥ 90% at ≥ 95%
+identity.
+
+**--hyps strategy in Phold**
+Phold full re-annotation can downgrade high-confidence Pharokka MMseqs2 hits when
+structural evidence is ambiguous. --hyps preserves all confident sequence-based
+annotations and applies structure-based annotation only to hypothetical proteins.
+Empirically: --hyps achieves +25 upgrades vs +22 for full re-annotation on a
+157 kb Ackermannviridae genome.
+
+**Dual-evidence AMR/virulence screening**
+AMR gene detection in phages requires both sensitivity (divergent sequences missed by
+sequence search) and specificity (avoiding false structural homologs). PhageFlow
+combines Pharokka MMseqs2 (sequence) with Phold Foldseek (structure) and reports
+confidence levels (HIGH = both, MEDIUM = sequence only, LOW = structure only).
 
 ---
 
 ## References
 
+- Al-Shayeb B et al. (2020) Clades of huge phages from across Earth's ecosystems. *Nature* 578:425
+- Antipov D et al. (2016) plasmidSPAdes: assembling plasmids from whole genome sequencing data. *Bioinformatics* 32:i60
 - Bankevich A et al. (2012) SPAdes: a new genome assembly algorithm. *J Comput Biol* 19:455
+- Bondy-Denomy J et al. (2013) Bacteriophage genes that inactivate the CRISPR/Cas bacterial immune system. *Nature* 493:429
 - Bouras G et al. (2023) Pharokka: a fast scalable bacteriophage annotation tool. *Bioinformatics* 39:btac776
 - Bouras G et al. (2025) Phold: structure-based functional annotation of phage proteins. *bioRxiv* 2025.08.05.668817
-- Bolger AM et al. (2014) Trimmomatic: a flexible trimmer for Illumina sequence data. *Bioinformatics* 30:2114
 - Camargo AP et al. (2023) Identification of mobile genetic elements with geNomad. *Nat Biotechnol* 41:1783
-- Chen S et al. (2018) fastp: an ultra-fast all-in-one FASTQ preprocessor. *Genome Biology* 19:274
-- Fu L et al. (2012) CD-HIT: accelerated for clustering the next-generation sequencing data. *Bioinformatics* 28:3150
-- Grigson SR et al. (2025) Phynteny: a synteny-based approach to phage annotation. *bioRxiv* 2025.07.28.667340
-- Head SR et al. (2014) Library construction for next-generation sequencing: overviews and challenges. *Biotechniques* 56:61
+- Chen S et al. (2018) fastp: an ultra-fast all-in-one FASTQ preprocessor. *Bioinformatics* 34:i884
+- Colomer-Lluch M et al. (2011) Bacteriophages carrying antibiotic resistance genes in human feces. *Antimicrob Agents Chemother* 55:4247
+- Fu L et al. (2012) CD-HIT: accelerated for clustering next-generation sequencing data. *Bioinformatics* 28:3150
+- Head SR et al. (2014) Library construction for next-generation sequencing. *Biotechniques* 56:61
+- Heinzinger M et al. (2023) Bilingual language model for protein sequence and structure. *Bioinformatics* 39:btad436
+- Holtgrewe M et al. (2013) Mason: a read simulator for second generation sequencing data. *PLoS ONE* 8:e61458
 - Li D et al. (2015) MEGAHIT: an ultra-fast single-node solution for large and complex metagenomics assembly. *Bioinformatics* 31:1674
+- McNair K et al. (2019) PHANOTATE: a novel approach to gene identification in phage genomes. *Bioinformatics* 35:4537
 - Nayfach S et al. (2021) CheckV assesses the quality and completeness of metagenome-assembled viral genomes. *Nat Biotechnol* 39:578
+- Pawluk A et al. (2016) Naturally occurring off-switches for CRISPR-Cas that silence microbial immune systems. *Science* 351:aad8405
 - Prjibelski A et al. (2020) Using SPAdes de novo assembler. *Curr Protoc Bioinf* 70:e102
 - Roux S et al. (2019) Minimum information about an uncultivated virus genome (MIUViG). *Nat Biotechnol* 37:29
-- Turner D et al. (2021) Abolishment of morphology-based taxa and change to binomial species names: 2022 taxonomy update of the ICTV bacterial viruses subcommittee. *Arch Virol* 166:2633
-- Wick R & Holt K (2022) Benchmarking of long-read assemblers for prokaryote whole genome sequencing. *Microb Genomics* 8:mgen000788
+- Schmieder R & Edwards R (2011) Fast identification and removal of sequence contamination from genomic and metagenomic datasets. *PLoS ONE* 6:e17288
+- Shimoyama Y (2022) pyGenomeViz: a genome visualization python package for comparative genomics. *bioRxiv* 2022.11.24.517870
+- Stanley SY & Maxwell KL (2018) Phage-encoded anti-CRISPR defenses. *Annu Rev Genet* 52:445
+- Turner D et al. (2021) Abolishment of morphology-based taxa and change to binomial species names. *Arch Virol* 166:2633
+- van Kempen M et al. (2024) Fast and accurate protein structure search with Foldseek. *Nat Biotechnol* 42:243
+- Wick R et al. (2021) Assembling the perfect bacterial genome using Oxford Nanopore and Illumina sequencing. *Genome Biol* 22:241
+- Wood DE et al. (2019) Improved metagenomic analysis with Kraken 2. *Genome Biol* 20:257
+- Yutin N et al. (2018) Discovery of an expansive bacteriophage family that includes the most abundant viruses from the human gut. *Nat Microbiol* 3:1145
 
 ---
 
