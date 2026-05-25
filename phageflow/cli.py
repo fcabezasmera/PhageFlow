@@ -734,9 +734,11 @@ def cmd_resistance(config, workdir, output_dir, reports_dir, threads, force, pro
 @click.option("--genomad",  is_flag=True, default=False, help="Download geNomad database.")
 @click.option("--pharokka", is_flag=True, default=False, help="Download Pharokka database.")
 @click.option("--phold",    is_flag=True, default=False, help="Download Phold database.")
+@click.option("--kraken2",  is_flag=True, default=False,
+              help="Download Kraken2 standard-16GB database (~16 GB).")
 @click.option("--all",      "all_dbs", is_flag=True, default=False,
               help="Download all databases (recommended for first-time setup).")
-def cmd_download_databases(output_dir, checkv, genomad, pharokka, phold, all_dbs):
+def cmd_download_databases(output_dir, checkv, genomad, pharokka, phold, kraken2, all_dbs):
     """Download PhageFlow databases and write config to ~/.config/phageflow/config.yaml.
 
     \b
@@ -756,6 +758,7 @@ def cmd_download_databases(output_dir, checkv, genomad, pharokka, phold, all_dbs
     if all_dbs or genomad:  dbs_to_download.append("genomad")
     if all_dbs or pharokka: dbs_to_download.append("pharokka")
     if all_dbs or phold:    dbs_to_download.append("phold")
+    if all_dbs or kraken2:  dbs_to_download.append("kraken2")
 
     if not dbs_to_download:
         log_warn("No databases selected. Use --all or specify individual databases.")
@@ -795,6 +798,32 @@ def cmd_download_databases(output_dir, checkv, genomad, pharokka, phold, all_dbs
         subprocess.run(["phold", "install", "-d", str(db_dir)], check=True)
         db_paths["phold"] = str(db_dir)
         log_ok(f"  Phold → {db_paths['phold']}")
+
+    if "kraken2" in dbs_to_download:
+        import urllib.request
+        log_info("  [5] Kraken2 standard-16GB database (~16 GB)")
+        db_dir = out / "k2_db"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        # Latest standard-16GB from AWS
+        k2_url = "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_16gb_20241228.tar.gz"
+        k2_tar = db_dir / "k2_standard_16gb.tar.gz"
+        log_info(f"  Downloading from {k2_url}")
+        log_info("  This may take 20-40 minutes depending on connection speed...")
+
+        def _progress(block_num, block_size, total_size):
+            if total_size > 0:
+                pct = min(100, block_num * block_size / total_size * 100)
+                if block_num % 500 == 0:
+                    log_info(f"    {pct:.1f}% ({block_num * block_size / 1e9:.1f} GB)")
+
+        urllib.request.urlretrieve(k2_url, k2_tar, reporthook=_progress)
+        log_info("  Extracting Kraken2 database...")
+        import tarfile
+        with tarfile.open(k2_tar) as tar:
+            tar.extractall(db_dir)
+        k2_tar.unlink()
+        db_paths["kraken2"] = str(db_dir)
+        log_ok(f"  Kraken2 → {db_paths['kraken2']}")
 
     # Write user config
     user_cfg_dir = Path.home() / ".config" / "phageflow"
