@@ -1,5 +1,21 @@
-"""PhageFlow Module 02 — Host read removal."""
+"""PhageFlow Module 02 — Host read removal.
 
+Primary mode  : bwa-mem2 (alignment-based, streaming, no BAM on disk)
+Alternative   : Kraken2 (classification-based, when no reference available)
+
+bwa-mem2 pipeline:
+    bwa-mem2 mem | samtools view -bF 2304 | samtools sort -n | samtools fastq
+      -f 4 -F 256  → unmapped reads (phage pairs)
+      -s           → one mate unmapped → DTR/ITR singletons → SPAdes --s1
+      -0 /dev/null → mapped (host) → discard
+
+Singleton recovery is critical for phages with DTR/ITR termini — reads
+spanning the circular junction are discarded by paired-mode tools but
+improve terminal coverage and CheckV Complete classification
+(Nayfach et al. 2021, Nat Biotechnol 39:578).
+
+samtools ≥ 1.15 required for `samtools fastq -N`.
+"""
 from __future__ import annotations
 import subprocess
 import sys
@@ -31,9 +47,6 @@ _PHAGE_WARN      = 50.0
 _PHAGE_CRITICAL  = 20.0
 _K2_UNCLASS_WARN = 0.30
 _MIN_READS       = 50_000
-_ST_VIEW_THREADS  = 8
-_ST_SORT_THREADS  = 8
-_ST_FASTQ_THREADS = 4
 _SAMTOOLS_MIN_VERSION = (1, 15)
 _LEVEL_A_SUBSAMPLE    = 50_000
 
@@ -55,13 +68,11 @@ def run(
     host_dir = rpt_dir / "host_genomes"
     tmp_dir  = out_dir / "tmp" / sample_id
 
-    # Determine mode before creating directories so host_dir is only
-    # created when bwa-mem2 will actually be used.
     use_bwa = bool(host_file or accessions or accessions_file)
     if use_bwa:
         mkdirs(out_dir, rpt_dir, host_dir, tmp_dir)
     else:
-        mkdirs(out_dir, rpt_dir, tmp_dir)   # host_dir unused in Kraken2 mode
+        mkdirs(out_dir, rpt_dir, tmp_dir)
 
     r1_out        = out_dir / f"{sample_id}_R1.fastq.gz"
     r2_out        = out_dir / f"{sample_id}_R2.fastq.gz"
@@ -94,7 +105,7 @@ def run(
             log_error(
                 "  No host reference provided and no Kraken2 database found.\n"
                 "  Provide at least one of:\n"
-                "    --accessions GCF_XXXXXXXX.X   (NCBI accession)\n"
+                "    --accessions GCF_XXXXXXXX.X\n"
                 "    --host-file /path/to/host.fasta\n"
                 "    --kraken-db /path/to/k2_db\n"
                 "  Or set databases.kraken2 in config.yaml"
@@ -122,9 +133,7 @@ def run(
             progress.update(task, description="[1/3] bwa-mem2 — reference + index")
             idx = Path(str(combined) + ".bwt.2bit.64")
             if idx.exists() and not force:
-                # Index cached from previous run — skip download and rebuild.
-                # Re-run with --force to refresh reference genomes.
-                log_info("  [bwa-mem2] index cached — skipping download + rebuild  (--force to refresh)")
+                log_info("  [bwa-mem2] index cached — skipping  (--force to refresh)")
             else:
                 fastas = _resolve_fastas(host_file, accessions, accessions_file,
                                          host_dir, rpt_dir, always)
@@ -132,11 +141,9 @@ def run(
                     log_error("  No host FASTAs resolved.")
                     raise FileNotFoundError("No host reference FASTAs found.")
                 _build_index(fastas, combined, rpt_dir, force)
-                # Remove raw NCBI download artifacts — FASTAs already incorporated
-                # into combined_hosts.fasta. Keeps host_genomes/ clean.
                 _cleanup_ncbi_download(host_dir)
             progress.advance(task)
-            log_ok("  [1/3] bwa-mem2 — reference index ready")
+            log_ok("  [1/3] bwa-mem2 — index ready")
 
             progress.update(task, description="[2/3] bwa-mem2 — streaming alignment")
             stats = _run_bwa_pipeline(
@@ -144,12 +151,12 @@ def run(
                 tmp_dir, log_f, cfg.threads,
             )
             progress.advance(task)
-            log_ok("  [2/3] bwa-mem2 — alignment + extraction complete")
+            log_ok("  [2/3] bwa-mem2 — complete")
 
             progress.update(task, description="[3/3] Level A  — contamination check")
             _level_a_check(r1_out, r2_out, rpt_dir, sample_id, cfg, active_warnings)
             progress.advance(task)
-            log_ok("  [3/3] Level A  — contamination check complete")
+            log_ok("  [3/3] Level A  — complete")
 
         else:
             progress.update(task, description="[1/2] Kraken2  — classifying reads")
@@ -157,7 +164,7 @@ def run(
                 sample_id, r1, r2, Path(db), tmp_dir, rpt_dir, log_f, cfg.threads
             )
             progress.advance(task)
-            log_ok("  [1/2] Kraken2  — classification complete")
+            log_ok("  [1/2] Kraken2  — complete")
 
             if cfg.host_removal.kraken2_postfilter:
                 r1_k2 = tmp_dir / f"{sample_id}_k2_R1.fastq.gz"
@@ -185,11 +192,11 @@ def run(
                     sample_id, r1, r2, r1_out, r2_out, report, k2_out, tmp_dir, log_f,
                 )
                 progress.advance(task)
-                log_ok("  [2/2] seqtk    — phage reads extracted")
+                log_ok("  [2/2] seqtk    — complete")
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     try:
-        tmp_dir.parent.rmdir()   # remove tmp/ parent only if now empty
+        tmp_dir.parent.rmdir()
     except OSError:
         pass
 
@@ -211,7 +218,7 @@ def run(
     return r1_out, r2_out, singleton_out
 
 
-# ── samtools check ────────────────────────────────────────────────────────────
+# ── samtools version check ────────────────────────────────────────────────────
 
 def _check_samtools_version() -> None:
     try:
@@ -222,8 +229,10 @@ def _check_samtools_version() -> None:
             ver_str = parts[1].split("-")[0]
             major, minor = (int(x) for x in ver_str.split(".")[:2])
             if (major, minor) < _SAMTOOLS_MIN_VERSION:
-                log_warn(f"  CRITICAL: samtools {ver_str} < 1.15. "
-                         "Fix: mamba install -n phageflow 'samtools>=1.15'")
+                log_warn(
+                    f"  CRITICAL: samtools {ver_str} < 1.15. "
+                    "Fix: mamba install -n phageflow 'samtools>=1.15'"
+                )
     except Exception:
         log_warn("  Could not verify samtools version — ensure ≥1.15 is active.")
 
@@ -309,50 +318,27 @@ def _build_index(fastas: List[Path], combined: Path, rpt_dir: Path, force: bool)
     log_ok("  [bwa-mem2] index ready")
 
 
-# ── bwa-mem2 streaming pipeline ───────────────────────────────────────────────
-
 def _cleanup_ncbi_download(host_dir: Path) -> None:
-    """Remove raw NCBI download folder after combined FASTA is built.
-
-    Keeps: combined_hosts.fasta + all bwa-mem2 index files.
-    Removes: ncbi_dataset/ (individual FASTAs + NCBI metadata).
-
-    The individual FASTAs are redundant once incorporated into combined_hosts.fasta.
-    On --force re-runs, datasets downloads fresh copies.
-    """
+    """Remove raw NCBI download folder after combined FASTA is built."""
     ncbi_dir = host_dir / "ncbi_dataset"
     if ncbi_dir.exists():
         shutil.rmtree(ncbi_dir, ignore_errors=True)
         log_info("  [cleanup] ncbi_dataset/ removed — combined FASTA retained")
 
 
+# ── bwa-mem2 streaming pipeline ───────────────────────────────────────────────
+
 def _run_bwa_pipeline(
     sample_id, r1, r2, combined, r1_out, r2_out, singleton_out,
     tmp_dir, log_f, threads,
 ) -> dict:
-    """Align + extract phage reads in a single streaming pipeline (no BAM on disk).
-
-    Pipeline:
-      bwa-mem2 mem | samtools view -bF 2304 | samtools sort -n | samtools fastq
-        -f 4 -F 256     → unmapped reads only
-        -1/-2           → both unmapped → phage pairs
-        -s              → one unmapped  → DTR/ITR singletons (→ SPAdes --s1)
-        -0 /dev/null    → mapped (host) → discard
-
-    sort -n replaces collate: sort -n is available from samtools 1.1+ and is
-    universally robust with stdin piping. collate -O had compatibility issues.
-    Li et al. 2009; Nayfach et al. 2021.
-    """
     sort_prefix = tmp_dir / f"{sample_id}.sort"
-    st_view  = min(threads, _ST_VIEW_THREADS)
-    st_sort  = min(threads, _ST_SORT_THREADS)
-    st_fastq = min(threads, _ST_FASTQ_THREADS)
 
     cmd = (
         f"bwa-mem2 mem -t {threads} -M {combined} {r1} {r2} "
-        f"| samtools view -@ {st_view} -bF 2304 -u "
-        f"| samtools sort -@ {st_sort} -n -u -T {sort_prefix} - "
-        f"| samtools fastq -@ {st_fastq} -N "
+        f"| samtools view -@ {min(threads,8)} -bF 2304 -u "
+        f"| samtools sort -@ {min(threads,8)} -n -u -T {sort_prefix} - "
+        f"| samtools fastq -@ {min(threads,4)} -N "
         f"  -f 4 -F 256 "
         f"  -1 {r1_out} -2 {r2_out} "
         f"  -s {singleton_out} "
@@ -399,11 +385,8 @@ def _level_a_check(
 ) -> None:
     """Kraken2 contamination screen on a subsample of extracted phage reads.
 
-    Diagnostic only — no reads removed. Based on post-extraction Kraken2
-    validation as practiced in clinical metagenomics pipelines.
+    Diagnostic only — no reads removed.
     Only runs when databases.kraken2 is configured.
-    Nayfach et al. 2021 (CheckV) shows host genes in assembled contigs
-    indicate failed host removal; this check provides early read-level warning.
     """
     k2_db = cfg.databases.kraken2
     if not k2_db or not k2_db.exists():
@@ -449,20 +432,27 @@ def _level_a_check(
 
     bacteria_pct = 0.0
     top_contaminants: list[tuple[str, float]] = []
-    in_bacteria = False; bact_depth = 0
+    in_bacteria = False
+    bact_depth  = 0
 
     with open(k2_rep) as f:
         for line in f:
             parts = line.strip().split("\t")
-            if len(parts) < 6: continue
+            if len(parts) < 6:
+                continue
             try:
-                pct = float(parts[0]); name_raw = parts[5]
-                depth = len(name_raw) - len(name_raw.lstrip()); name = name_raw.strip()
-            except (ValueError, IndexError): continue
+                pct      = float(parts[0])
+                name_raw = parts[5]
+                depth    = len(name_raw) - len(name_raw.lstrip())
+                name     = name_raw.strip()
+            except (ValueError, IndexError):
+                continue
             if name == "Bacteria":
-                bacteria_pct = pct; in_bacteria = True; bact_depth = depth; continue
+                bacteria_pct = pct; in_bacteria = True; bact_depth = depth
+                continue
             if in_bacteria:
-                if depth <= bact_depth: in_bacteria = False
+                if depth <= bact_depth:
+                    in_bacteria = False
                 elif pct >= warn_pct and depth == bact_depth + 2:
                     top_contaminants.append((name, pct))
 
@@ -471,15 +461,14 @@ def _level_a_check(
                    sorted(top_contaminants, key=lambda x: -x[1])[:3])
                    or "none at genus level")
         msg = (
-            f"Level A: {bacteria_pct:.1f}% of phage reads classified as Bacteria "
+            f"Level A: {bacteria_pct:.1f}% bacterial in phage reads "
             f"(threshold {warn_pct}%). Top: {top_str}. "
             "Consider re-running with --accessions including the contaminant."
         )
         log_warn(f"  {msg}")
         active_warnings.append(msg)
     else:
-        log_ok(f"  [Level A] {bacteria_pct:.1f}% bacterial in phage reads "
-               f"(threshold: {warn_pct}%) — OK")
+        log_ok(f"  [Level A] {bacteria_pct:.1f}% bacterial (threshold: {warn_pct}%) — OK")
 
 
 # ── Level B: adaptive post-filter ────────────────────────────────────────────
@@ -488,22 +477,12 @@ def _level_b_postfilter(
     sample_id, r1_k2, r2_k2, r1_out, r2_out, singleton_out,
     k2_report, tmp_dir, host_dir, rpt_dir, log_f, cfg, force,
 ) -> dict:
-    """bwa-mem2 post-filter after Kraken2 extraction (opt-in via kraken2_postfilter).
-
-    Identifies bacteria > postfilter_min_pct in the Kraken2 report, downloads
-    reference genomes via datasets CLI, and runs bwa-mem2 to capture residual
-    contamination and singletons at DTR/ITR boundaries.
-
-    Scientific basis: alignment-based removal has higher specificity than k-mer
-    classification for host reads (HoCoRT benchmark, Kracherberger et al. 2023).
-    Singleton recovery improves DTR/ITR detection → CheckV Complete classification
-    (Nayfach et al. 2021).
-    """
+    """bwa-mem2 post-filter after Kraken2 extraction (opt-in via kraken2_postfilter)."""
     min_pct = cfg.host_removal.postfilter_min_pct
     taxids  = _parse_contaminants_from_report(k2_report, min_pct)
 
     if not taxids:
-        log_info(f"  [Level B] No bacterial species > {min_pct}% — moving Kraken2 output directly")
+        log_info(f"  [Level B] No bacterial species > {min_pct}% — using Kraken2 output directly")
         for src, dst in [(r1_k2, r1_out), (r2_k2, r2_out)]:
             if src.exists(): src.rename(dst)
         singleton_out.write_bytes(b"")
@@ -524,8 +503,7 @@ def _level_b_postfilter(
 
     combined_pf = pf_dir / "combined_postfilter.fasta"
     _build_index(fastas, combined_pf, rpt_dir, force)
-    _cleanup_ncbi_download(pf_dir)   # remove per-taxid raw downloads after index build
-    n_k2 = _count_reads_fastq(r1_k2, cfg.threads)
+    _cleanup_ncbi_download(pf_dir)
     log_info(f"  [Level B] bwa-mem2 post-filter vs {len(fastas)} genome(s) "
              f"({len(taxids)} bacterial taxon(s) > {min_pct}%)")
 
@@ -537,10 +515,8 @@ def _level_b_postfilter(
 
     n_out = _count_reads_fastq(r1_out, cfg.threads)
     n_sin = _count_reads_fastq(singleton_out, cfg.threads)
-    total = n_k2 * 2; phage = n_out * 2 + n_sin
-    removed = max(0, total - phage)
-    if removed: log_info(f"  [Level B] {removed:,} residual host reads removed")
-    if n_sin:   log_ok(f"  [Level B] {n_sin:,} DTR/ITR singletons recovered from Kraken2 loss")
+    if n_sin:
+        log_ok(f"  [Level B] {n_sin:,} DTR/ITR singletons recovered from Kraken2 loss")
     return stats
 
 
@@ -609,7 +585,6 @@ def _classify_kraken2(sample_id, r1, r2, db, tmp_dir, rpt_dir, log_f, threads) -
 
 def _extract_phage_kraken2(sample_id, r1, r2, r1_out, r2_out,
                             report, k2_out, tmp_dir, log_f) -> dict:
-    """Extract phage reads from Kraken2 output. No singletons (Kraken2 limitation)."""
     un_r1 = tmp_dir / f"{sample_id}_unclassified_1.fastq"
     un_r2 = tmp_dir / f"{sample_id}_unclassified_2.fastq"
     viral_ids = tmp_dir / f"{sample_id}_viral_ids.txt"
@@ -707,7 +682,7 @@ def _validate_output(r1_out, r2_out, singleton_out, stats, active_warnings) -> N
         n = int(stats.get("reads_phage", 0))
         if n < _MIN_READS:
             msg = (f"Only {n:,} phage reads retained — < {_MIN_READS:,} "
-                   "may be insufficient for 50× on 150 kb genome (Nayfach et al. 2021).")
+                   "may be insufficient for 50× on 150 kb genome.")
             log_warn(f"  [validate] {msg}"); active_warnings.append(msg)
         else:
             log_ok(f"  [validate] {n:,} phage reads retained — OK")
@@ -723,7 +698,7 @@ def _check_warnings(stats, mode, active_warnings) -> None:
             log_warn(f"  {msg}"); active_warnings.append(msg)
         elif ph < _PHAGE_WARN:
             msg = (f"Phage fraction {stats.get('pct_phage')} < {_PHAGE_WARN}% — "
-                   "check reference genome and sample purity (Roux et al. 2019).")
+                   "check reference genome and sample purity.")
             log_warn(f"  {msg}"); active_warnings.append(msg)
     except (ValueError, AttributeError): pass
     if mode == "kraken2":
@@ -748,25 +723,19 @@ def _print_completion_panel(
             if v >= warn: return f"[bold yellow]{val}[/bold yellow]"
             return f"[bold red]{val}[/bold red]"
         except: return str(val)
+
     def _f(val):
-
         s = str(val)
-
         if s in ("N/A", "", "None"):
-
             return "[dim]N/A[/dim]"
-
         try:
-
             return f"{int(s):,}"
-
         except ValueError:
-
             return s
 
-    n_in  = _f(stats.get("reads_in",    "N/A"))
-    n_out = _f(stats.get("reads_phage", "N/A"))
-    n_sin = _f(stats.get("reads_singleton", "0"))
+    n_in  = _f(stats.get("reads_in",        "N/A"))
+    n_out = _f(stats.get("reads_phage",      "N/A"))
+    n_sin = _f(stats.get("reads_singleton",  "0"))
     ph    = stats.get("pct_phage", "N/A")
     ho    = stats.get("pct_host",  "N/A")
     unit  = "read pairs" if mode == "kraken2" else "reads"
@@ -781,10 +750,13 @@ def _print_completion_panel(
     if mode == "kraken2":
         lines.append(f"  [dim]Kraken2: unclassified={_f(stats.get('k2_unclass','N/A'))}"
                      f"  viral={_f(stats.get('k2_viral','N/A'))}[/dim]")
-    lines += ["", "[bold]Output files[/bold]",
-              f"  Phage R1   : {r1_out}", f"  Phage R2   : {r2_out}",
-              f"  Singletons : {singleton_out}",
-              f"  Summary    : {rpt_dir / 'host_removal_summary.tsv'}"]
+    lines += [
+        "", "[bold]Output files[/bold]",
+        f"  Phage R1   : {r1_out}",
+        f"  Phage R2   : {r2_out}",
+        f"  Singletons : {singleton_out}",
+        f"  Summary    : {rpt_dir / 'host_removal_summary.tsv'}",
+    ]
     if active_warnings:
         lines += ["", "[bold yellow]Warnings[/bold yellow]"]
         lines += [f"  [yellow]⚠ {w}[/yellow]" for w in active_warnings]
@@ -800,6 +772,7 @@ _TSV_HEADERS = [
     "sample", "mode", "reads_in", "reads_phage", "reads_singleton",
     "pct_host", "pct_phage", "pct_singleton", "k2_unclass", "k2_viral",
 ]
+
 
 def _save_tsv(row: dict, path: Path) -> None:
     rows: dict[str, dict] = {}

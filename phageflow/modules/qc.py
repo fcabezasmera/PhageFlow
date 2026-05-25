@@ -1,23 +1,15 @@
 """PhageFlow Module 01 — Quality control and trimming.
 
-Tools  : fastp (trim + filter) · FastQC (per-read) · MultiQC (aggregate)
-Target : high-coverage purified phage preps → CheckV Complete / HQ
+Tools  : fastp · FastQC · MultiQC
+Target : purified phage Illumina PE150 → CheckV Complete / HQ
 
-Parameters are tuned for purified phage Illumina PE150 with literature
-references inline. They differ from defaults for genomic WGS:
-
-  Q≥25 per-base + read-mean-Q≥22   Wick & Holt 2022, Microb Genomics 8:mgen000788
-  PE overlap correction, 5% diff   Chen et al. 2018, Genome Biology 19:274
-  --length_required 80 bp          Wick & Holt 2022 (PE150 post-trim norm)
-  --complexity_threshold 20        Roux et al. 2019, eLife 8:e42923 (MIUViG)
-                                    20% retains DTR/ITR; 15% rescues too many low-cmplx
-  --trim_poly_x 10 bp              Chen et al. 2018 (NextSeq/NovaSeq G-tails)
-  NO deduplication                 Head et al. 2014, Biotechniques 56:61
-                                    apparent "duplicates" at >100x are real reads
-
-CheckV completeness depends on terminal coverage; aggressive 3' trimming
-(cut_right Q25) is critical because low-Q tails inflate assembly graph errors
-that erode terminal repeat detection (Nayfach et al. 2021, Nat Biotechnol 39:578).
+Key design decisions:
+  Q≥25 per-base + read-mean-Q≥22   Wick & Holt 2022
+  PE overlap correction             Chen et al. 2018
+  --low_complexity_filter 20%       Roux et al. 2019 MIUViG
+  --trim_poly_x                     Chen et al. 2018 (NextSeq/NovaSeq G-tails)
+  NO deduplication                  Head et al. 2014 — apparent duplicates at
+                                    >100× are real reads, not PCR artefacts
 """
 from __future__ import annotations
 import json
@@ -31,29 +23,21 @@ from rich.progress import (
 )
 
 from phageflow.utils.config import Config
-from phageflow.utils.logger import (
-    log_step, log_info, log_ok, log_warn, console,
-)
+from phageflow.utils.logger import log_step, log_info, log_ok, log_warn, console
 from phageflow.utils.tools import require_tools, run_silent, human_size, mkdirs
 
 STEP  = "01_qc"
 TOOLS = ["fastp", "fastqc", "multiqc"]
 
-# ── Warning thresholds (evaluation only — NOT fastp filter parameters) ───────
-_PASS_GOOD = 85.0          # pass rate expected with strict HQ filters
+_PASS_GOOD = 85.0
 _PASS_WARN = 75.0
 _Q20_GOOD  = 95.0
 _Q20_WARN  = 90.0
-_Q30_GOOD  = 80.0          # Q30 ≥80% is excellent for purified phage
+_Q30_GOOD  = 80.0
 _Q30_WARN  = 70.0
-_MIN_READS = 100_000       # ~100x on 150 kb phage at PE150 (Nayfach et al. 2021)
-
-# Reference phage genome size for the rough coverage estimate shown in the
-# completion panel. Median tailed-dsDNA phage ≈ 50 kb (Mavrich & Hatfield 2017).
+_MIN_READS     = 100_000
 _REF_GENOME_BP = 50_000
 
-
-# ── Public entry point ───────────────────────────────────────────────────────
 
 def run(
     cfg:       Config,
@@ -64,8 +48,8 @@ def run(
 ) -> tuple[Path, Path]:
     """Quality-control paired reads. Returns (r1_trimmed, r2_trimmed)."""
     r1 = Path(r1); r2 = Path(r2)
-    out_dir = cfg.results(STEP)                # results/01_qc/  (matches other modules)
-    rpt_dir = cfg.reports(STEP) / sample_id    # reports/01_qc/{sample_id}/
+    out_dir = cfg.results(STEP)
+    rpt_dir = cfg.reports(STEP) / sample_id
     mkdirs(out_dir, rpt_dir)
 
     for label, p in (("R1", r1), ("R2", r2)):
@@ -104,17 +88,17 @@ def run(
         progress.update(task, description="[1/3] fastp   — trimming + quality filter")
         _run_fastp(sample_id, r1, r2, r1_out, r2_out, json_f, html_f, log_f, cfg)
         progress.advance(task)
-        log_ok("  [1/3] fastp   — trimming + filtering complete")
+        log_ok("  [1/3] fastp   — complete")
 
         progress.update(task, description="[2/3] FastQC  — per-read QC")
         _run_fastqc(r1_out, r2_out, rpt_dir, log_f)
         progress.advance(task)
-        log_ok("  [2/3] FastQC  — per-read reports written")
+        log_ok("  [2/3] FastQC  — reports written")
 
         progress.update(task, description="[3/3] MultiQC — aggregate report")
         _run_multiqc(rpt_dir, sample_id)
         progress.advance(task)
-        log_ok("  [3/3] MultiQC — aggregate report ready")
+        log_ok("  [3/3] MultiQC — report ready")
 
     metrics = _parse_fastp_json(json_f)
     _check_warnings(metrics, active_warnings)
@@ -131,8 +115,6 @@ def run(
     return r1_out, r2_out
 
 
-# ── fastp ────────────────────────────────────────────────────────────────────
-
 def _run_fastp(
     sample_id: str,
     r1: Path, r2: Path,
@@ -140,7 +122,6 @@ def _run_fastp(
     json_f: Path, html_f: Path,
     log_f:  Path, cfg,
 ) -> None:
-    """Run fastp with phage-optimized parameters (see module docstring)."""
     q = cfg.qc
     cmd = [
         "fastp",
@@ -160,7 +141,6 @@ def _run_fastp(
         "--html",                       str(html_f),
         "--report_title",               f"PhageFlow QC — {sample_id}",
     ]
-    # Conditional flags — respect config booleans
     if q.correction:
         cmd += [
             "--correction",
@@ -168,18 +148,19 @@ def _run_fastp(
             "--overlap_diff_percent_limit", str(q.overlap_diff_percent_limit),
         ]
     if q.low_complexity_filter:
-        cmd += ["--low_complexity_filter",
-                "--complexity_threshold",       str(q.complexity_threshold)]
+        cmd += [
+            "--low_complexity_filter",
+            "--complexity_threshold", str(q.complexity_threshold),
+        ]
     if q.trim_poly_x:
-        cmd += ["--trim_poly_x",
-                "--poly_x_min_len",             str(q.poly_x_min_len)]
+        cmd += [
+            "--trim_poly_x",
+            "--poly_x_min_len", str(q.poly_x_min_len),
+        ]
     run_silent(cmd, log_file=log_f)
 
 
-# ── FastQC + MultiQC ─────────────────────────────────────────────────────────
-
 def _run_fastqc(r1: Path, r2: Path, out_dir: Path, log_f: Path) -> None:
-    """Run FastQC on R1 and R2 concurrently."""
     def _one(read: Path) -> None:
         if not read.exists():
             return
@@ -197,7 +178,6 @@ def _run_fastqc(r1: Path, r2: Path, out_dir: Path, log_f: Path) -> None:
 
 
 def _run_multiqc(rpt_dir: Path, sample_id: str) -> None:
-    """Aggregate fastp + FastQC reports for this sample."""
     mqc_dir = rpt_dir / "multiqc"
     mkdirs(mqc_dir)
     try:
@@ -213,16 +193,12 @@ def _run_multiqc(rpt_dir: Path, sample_id: str) -> None:
         log_warn(f"  [MultiQC] {e}")
 
 
-# ── fastp JSON parsing + evaluation ──────────────────────────────────────────
-
 def _parse_fastp_json(json_f: Path) -> dict:
-    """Extract QC metrics + rough coverage estimate from fastp JSON."""
     empty = {
-    "reads_in": "0", "reads_out": "0", "pct_pass": "0.0%",
-    "gc_pct":   "N/A", "q20_pct": "N/A", "q30_pct": "N/A",
-    "bp_out":   "0",   "dup_pct": "N/A", "est_coverage": "N/A",
-    }  
-    
+        "reads_in": "0", "reads_out": "0", "pct_pass": "0.0%",
+        "gc_pct":   "N/A", "q20_pct": "N/A", "q30_pct": "N/A",
+        "bp_out":   "0",   "dup_pct": "N/A", "est_coverage": "N/A",
+    }
     if not json_f.exists():
         return empty
     try:
@@ -252,45 +228,48 @@ def _parse_fastp_json(json_f: Path) -> dict:
 
 
 def _check_warnings(m: dict, active_warnings: list[str]) -> None:
-    """Evaluate metrics. Diagnostic only — no reads removed here."""
     def _pct(key: str) -> float:
         try:
             return float(str(m.get(key, "0")).rstrip("%"))
         except (ValueError, TypeError):
             return 0.0
 
+    # Skip all warnings if fastp produced no output (empty JSON fallback)
+    try:
+        ri = int(str(m.get("reads_in", "0")).replace(",", ""))
+    except (ValueError, TypeError):
+        ri = 0
+    if ri == 0:
+        return
+
     pp = _pct("pct_pass")
-    if 0 < pp < _PASS_WARN:
+    if pp < _PASS_WARN:
         msg = f"Pass rate {m['pct_pass']} < {_PASS_WARN}% — review input quality"
         log_warn(f"  ⚠ {msg}"); active_warnings.append(msg)
 
     q30 = _pct("q30_pct")
-    if 0 < q30 < _Q30_WARN:
+    if q30 < _Q30_WARN:
         msg = f"Q30 rate {m['q30_pct']} < {_Q30_WARN}% — assembly contiguity may suffer"
         log_warn(f"  ⚠ {msg}"); active_warnings.append(msg)
-        
-    dup = _pct("dup_pct")
-    if dup > 70.0:
-        log_info(
-            f"  ℹ Duplication {m.get('dup_pct','?')} — normal at high phage coverage (Head et al. 2014). NOT deduplicated."
-        )
 
     dup = _pct("dup_pct")
     if dup > 70.0:
         log_info(
-            f"  ℹ Duplication {m.get('dup_pct','?')} — normal at high phage coverage (Head et al. 2014). NOT deduplicated."
+            f"  ℹ Duplication {m.get('dup_pct','?')} — normal at high phage "
+            "coverage (Head et al. 2014). NOT deduplicated."
         )
 
     try:
         ro = int(str(m.get("reads_out", "0")).replace(",", ""))
     except (ValueError, TypeError):
         ro = 0
-    if 0 < ro < _MIN_READS:
-        msg = (f"Only {ro:,} reads retained (< {_MIN_READS:,}) — "
-                "may be insufficient for CheckV Complete on a typical phage")
+    if ro < _MIN_READS:
+        msg = (
+            f"Only {ro:,} reads retained (< {_MIN_READS:,}) — "
+            "may be insufficient for CheckV Complete on a typical phage"
+        )
         log_warn(f"  ⚠ {msg}"); active_warnings.append(msg)
 
-# ── Completion panel ─────────────────────────────────────────────────────────
 
 def _print_completion_panel(
     sample_id, r1_out, r2_out, rpt_dir, m: dict, active_warnings: list[str],
@@ -312,8 +291,7 @@ def _print_completion_panel(
         f"  Q30={_c(m.get('q30_pct','0%'), _Q30_GOOD, _Q30_WARN)}"
         f"  GC={m.get('gc_pct','N/A')}  dup={m.get('dup_pct','N/A')}",
         f"  [cyan]Yield   :[/cyan] {m.get('bp_out','?')} bp  "
-        f"≈{m.get('est_coverage','?')} on 50 kb phage  "
-        f"[dim](÷3 for 150 kb)[/dim]",
+        f"≈{m.get('est_coverage','?')} on 50 kb phage  [dim](÷3 for 150 kb)[/dim]",
         "",
         "[bold]Output[/bold]",
         f"  R1      : {r1_out}",
@@ -331,8 +309,6 @@ def _print_completion_panel(
         border_style="cyan", padding=(0, 2), width=120,
     ))
 
-
-# ── TSV summary ──────────────────────────────────────────────────────────────
 
 _TSV_HEADERS = [
     "sample_id", "reads_in", "reads_out", "pct_pass",
