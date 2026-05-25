@@ -23,7 +23,7 @@ from phageflow.utils.tools import (
 )
 
 STEP  = "06_annotation"
-TOOLS = ["pharokka.py", "phold", "phynteny_transformer"]
+TOOLS = ["pharokka.py", "phold"]
 
 # ── Phold parameters ──────────────────────────────────────────────────────────
 _PHOLD_SENSITIVITY = "9.5"   # default in phold; explicit for reproducibility
@@ -94,7 +94,6 @@ def run(
 
     use_gpu    = getattr(cfg.annotate, "phold_gpu",           True)
     batch_size = getattr(cfg.annotate, "phold_batch_size",    1)
-    phynteny_c = getattr(cfg.annotate, "phynteny_confidence", 0.7)
     gpu_tag    = "--foldseek_gpu" if use_gpu else "--cpu"
 
     plot_strategy = (
@@ -109,18 +108,15 @@ def run(
     )
     log_info(f"  [1/4] Pharokka  : PHANOTATE/prodigal-gv + PHROGs MMseqs2 + PyHMMER")
     log_info(f"  [2/4] Phold     : ProstT5 + Foldseek --hyps {gpu_tag} (s={_PHOLD_SENSITIVITY})")
-    log_info(f"  [3/4] Phynteny  : Transformer + ESM2 (confidence ≥{phynteny_c})")
     log_info(f"  [4/4] Plot      : {plot_strategy} from Phold GBK")
 
     pharokka_dir = cdir / "pharokka"
     phold_dir    = cdir / "phold"
-    phynteny_dir = cdir / "phynteny"
     plots_dir    = cdir / "plots"
-    mkdirs(pharokka_dir, phold_dir, phynteny_dir, plots_dir)
+    mkdirs(pharokka_dir, phold_dir, plots_dir)
 
     gbk_pharokka = pharokka_dir / f"{candidate_id}.gbk"
     gbk_phold    = phold_dir    / f"{candidate_id}.gbk"
-    gbk_phynteny: Optional[Path] = None
 
     tier1: dict = {}
     tier2: dict = {}
@@ -169,13 +165,7 @@ def run(
             _validate_noncds_in_phold(gbk_pharokka, gbk_phold, tier1)
         progress.advance(task)
 
-        # 3/4 — Phynteny Transformer
-        progress.update(task, description="[3/4] Phynteny  — synteny + ESM2 upgrade")
-        _run_phynteny(cfg, candidate_id, gbk_phold, phynteny_dir, rpt_dir, force)
-        gbk_phynteny = _find_phynteny_gbk(phynteny_dir, candidate_id)
-        tier3 = _parse_phynteny_per_cds(
-            phynteny_dir, candidate_id, phynteny_c, tier2,
-        )
+        tier3 = {}
         if tier3:
             p1, p2, p3 = (
                 tier1.get("annotated", 0),
@@ -186,11 +176,8 @@ def run(
             tot = tier1.get("total_cds", 0)
             pct = f"{cum / tot * 100:.1f}%" if tot else "?"
             log_ok(
-                f"  [Tier 3 Phynteny] Δ+{p3} predicted | "
                 f"cumulative {cum}/{tot} ({pct})"
             )
-            if gbk_phynteny:
-                _validate_noncds_in_phynteny(gbk_phold, gbk_phynteny)
         progress.advance(task)
 
         # 4/4 — Plot (phold circular OR pyGenomeViz linear)
@@ -203,7 +190,6 @@ def run(
     _save_delta_report(
         candidate_id, sample_id,
         tier1, tier2, tier3,
-        phynteny_c,         # pass config value — not the module constant
         delta_path,
     )
 
@@ -215,7 +201,7 @@ def run(
     )
 
     _print_completion_panel(
-        candidate_id, gbk_phold, gbk_phynteny,
+        candidate_id, gbk_phold,
         pharokka_dir, plots_dir,
         tier1, tier2, tier3,
         n_ctg,
@@ -224,8 +210,6 @@ def run(
     log_step(f"Module 06 completed ✓  [{candidate_id}]")
     log_ok(f"  GBK (Phold)     : {gbk_phold}  ← use for downstream / phold plot")
     log_ok(
-        f"  GBK (Phynteny)  : {gbk_phynteny or 'not produced'}"
-        f"  ← /phynteny_* qualifiers only"
     )
     log_ok(f"  Delta report    : {delta_path}")
     log_ok(
@@ -328,69 +312,6 @@ def _run_phold(cfg, candidate_id, input_gbk, phold_dir, gbk_out, rpt_dir, force)
     except Exception as e:
         log_warn(f"  [Phold] warning: {e}")
 
-# ── Step 3: Phynteny Transformer ──────────────────────────────────────────────
-
-def _run_phynteny(cfg, candidate_id, input_gbk, phynteny_dir, rpt_dir, force):
-    if not input_gbk.exists():
-        log_warn("  [Phynteny] skipped — Phold GBK not found")
-        return
-
-    existing = list(phynteny_dir.glob("*.gbk"))
-    if existing and not force:
-        log_info("  [Phynteny] already exists — skipping  (--force to re-run)")
-        return
-
-    models_path = cfg.databases.phynteny / "models"
-    if not models_path.exists():
-        log_warn(f"  [Phynteny] models not found: {models_path}")
-
-    confidence = getattr(cfg.annotate, "phynteny_confidence", 0.7)
-
-    cmd = [
-        "phynteny_transformer",
-        str(input_gbk),
-        "-o",                     str(phynteny_dir),
-        "--prefix",               candidate_id,
-        "-m",                     str(models_path),
-        "--confidence-threshold", str(confidence),
-        "-f",   # --force: overwrite existing output directory
-    ]
-
-    log_info(
-        f"  [Phynteny] input=Phold GBK | confidence ≥{confidence} | "
-        f"output: /phynteny_category, /phynteny_score, /phynteny_confidence"
-    )
-    log_info(
-        "  [Phynteny] NOTE: /product and /function are NOT modified by Phynteny"
-    )
-
-    try:
-        run_silent(cmd, log_file=rpt_dir / f"{candidate_id}_phynteny.log")
-        log_ok("  [Phynteny] OK")
-    except Exception as e:
-        log_warn(f"  [Phynteny] warning: {e}")
-
-def _find_phynteny_gbk(phynteny_dir: Path, candidate_id: str) -> Optional[Path]:
-    """Locate Phynteny output GBK — checks known naming patterns before glob.
-
-    phynteny_transformer outputs 'phynteny_transformer.gbk' by default
-    when no --prefix is given. With --prefix, the name may vary.
-    Candidates ordered from most to least specific.
-    """
-    candidates = [
-        phynteny_dir / "phynteny_transformer.gbk",   # default tool output name
-        phynteny_dir / "phynteny.gbk",
-        phynteny_dir / f"{candidate_id}.gbk",
-        phynteny_dir / f"{candidate_id}_phynteny_transformer.gbk",
-    ]
-    found = next((p for p in candidates if p.exists()), None)
-    if found is None:
-        gbks  = list(phynteny_dir.glob("*.gbk"))
-        found = gbks[0] if gbks else None
-    return found
-
-# ── Step 4: Plot routing ──────────────────────────────────────────────────────
-
 def _run_plots(
     candidate_id: str,
     gbk_phold:   Path,
@@ -404,7 +325,6 @@ def _run_plots(
 
     Single-contig (n_ctg == 1):
         phold plot — circular map (PNG + SVG).
-        phold reads /product and Foldseek qualifiers that Phynteny does not
         expose, so the Phold GBK is always the correct input.
 
     Multi-contig (n_ctg > 1):
@@ -686,137 +606,6 @@ def _parse_phold_per_cds(
         "phold_rows":  phold_rows,
     }
 
-def _parse_phynteny_per_cds(
-    phynteny_dir:  Path,
-    candidate_id:  str,
-    confidence:    float,
-    tier2:         dict,
-) -> dict:
-    """
-    Parse Phynteny Transformer per-CDS data from phynteny_per_cds_funcions.tsv.
-
-    NOTE: 'funcions' is a confirmed typo in the tool's output filename
-    (verified against the susiegriggo/Phynteny_transformer repository README).
-
-    Phynteny adds /phynteny_category, /phynteny_score, /phynteny_confidence
-    qualifiers to the GBK but does NOT modify /product or /function.
-
-    Delta logic:
-        Count CDS that (a) were still hypothetical after Phold, AND
-        (b) received a Phynteny prediction with confidence ≥ threshold.
-
-    Reference: Grigson et al. 2025, bioRxiv 2025.07.28.667340
-    """
-    tsv_candidates = [
-        phynteny_dir / "phynteny_per_cds_funcions.tsv",           # confirmed tool typo
-        phynteny_dir / f"{candidate_id}_phynteny_per_cds_funcions.tsv",
-        phynteny_dir / "phynteny_per_cds_functions.tsv",           # corrected spelling fallback
-        phynteny_dir / f"{candidate_id}_phynteny_per_cds_functions.tsv",
-    ]
-    tsv = next((p for p in tsv_candidates if p.exists()), None)
-
-    if not tsv:
-        log_info(
-            "  [Phynteny] per-CDS TSV not found — "
-            "falling back to GBK qualifier parsing for delta count"
-        )
-        return _parse_phynteny_gbk_qualifiers_fallback(
-            phynteny_dir, candidate_id, confidence, tier2,
-        )
-
-    phold_still_hypo: set[str] = set()
-    for r in tier2.get("phold_rows", []):
-        product = r.get("product", "").strip().lower()
-        if product in _UNKNOWN_CATS or product == "":
-            phold_still_hypo.add(r.get("locus_tag", "").strip())
-
-    phynteny_rows: list[dict] = []
-    upgraded = 0
-
-    with open(tsv, newline="") as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        for row in reader:
-            phynteny_rows.append(row)
-            locus = row.get("locus_tag", "").strip()
-            cat   = row.get("phynteny_category", "").strip().lower()
-            try:
-                conf_val = float(row.get("phynteny_confidence", 0) or 0)
-            except (ValueError, TypeError):
-                conf_val = 0.0
-
-            if (
-                locus in phold_still_hypo
-                and cat
-                and cat not in _UNKNOWN_CATS
-                and conf_val >= confidence
-            ):
-                upgraded += 1
-
-    return {
-        "upgraded":      upgraded,
-        "phynteny_rows": phynteny_rows,
-        "source":        "tsv",
-    }
-
-def _parse_phynteny_gbk_qualifiers_fallback(
-    phynteny_dir:  Path,
-    candidate_id:  str,
-    confidence:    float,
-    tier2:         dict,
-) -> dict:
-    """
-    Fallback: parse /phynteny_* qualifiers directly from the Phynteny GBK
-    when the per-CDS TSV is absent.
-
-    Preferred only as a fallback — the TSV is more structured and less
-    fragile than regex-based GBK parsing.
-    """
-    gbk_phynteny = _find_phynteny_gbk(phynteny_dir, candidate_id)
-    if not gbk_phynteny:
-        return {}
-
-    phold_still_hypo: set[str] = set()
-    for r in tier2.get("phold_rows", []):
-        product = r.get("product", "").strip().lower()
-        if product in _UNKNOWN_CATS or product == "":
-            phold_still_hypo.add(r.get("locus_tag", "").strip())
-
-    try:
-        text = gbk_phynteny.read_text(errors="replace")
-    except Exception:
-        return {}
-
-    upgraded = 0
-    for block in text.split("     CDS ")[1:]:
-        def _q(name: str) -> str:
-            m = re.search(rf'/{name}="((?:[^"\\]|\\.|\n\s+)*)"', block)
-            if not m:
-                return ""
-            return re.sub(r"\n\s+", " ", m.group(1)).strip()
-
-        locus = _q("locus_tag")
-        cat   = _q("phynteny_category").lower()
-        try:
-            conf_val = float(_q("phynteny_confidence") or 0)
-        except (ValueError, TypeError):
-            conf_val = 0.0
-
-        if (
-            locus in phold_still_hypo
-            and cat
-            and cat not in _UNKNOWN_CATS
-            and conf_val >= confidence
-        ):
-            upgraded += 1
-
-    return {
-        "upgraded":      upgraded,
-        "phynteny_rows": [],
-        "source":        "gbk_fallback",
-    }
-
-# ── Non-CDS feature validation ────────────────────────────────────────────────
-
 def _count_noncds_gbk(gbk_path: Path) -> dict[str, int]:
     """Count non-CDS feature lines in a GBK file by feature type keyword."""
     if not gbk_path or not gbk_path.exists():
@@ -847,64 +636,12 @@ def _validate_noncds_in_phold(
                 f"  [non-CDS] {feat}: Pharokka={n_pk} vs Phold={n_ph}"
             )
 
-def _validate_noncds_in_phynteny(
-    gbk_phold: Path, gbk_phynteny: Path,
-) -> None:
-    """
-    Check whether Phynteny preserved non-CDS features from the Phold GBK.
-    Phynteny does NOT document this behaviour — validation is mandatory.
-    If features are lost, the Phold GBK remains the authoritative source.
-    """
-    ph = _count_noncds_gbk(gbk_phold)
-    py = _count_noncds_gbk(gbk_phynteny)
-    lost: list[str] = []
-    for feat, n_ph in ph.items():
-        n_py = py.get(feat, 0)
-        if n_ph > 0 and n_py == 0:
-            lost.append(f"{feat}({n_ph}→0)")
-        elif n_ph != n_py:
-            lost.append(f"{feat}({n_ph}→{n_py})")
-    if lost:
-        log_warn(
-            f"  [non-CDS] Phynteny GBK lost features: {', '.join(lost)}. "
-            f"Phold GBK is authoritative for plotting and downstream use."
-        )
-    else:
-        log_ok("  [non-CDS] Phynteny preserved all non-CDS features from Phold GBK")
-
-# ── Per-CDS delta report ──────────────────────────────────────────────────────
-
-_DELTA_HEADERS = [
-    "candidate_id",
-    "locus_tag",
-    # Tier 1 — Pharokka
-    "t1_annot",
-    "t1_phrog",
-    "t1_category",
-    "t1_vfdb_hit",
-    "t1_card_hit",
-    # Tier 2 — Phold
-    "t2_product",
-    "t2_phrog_category",
-    "t2_annotation_confidence",
-    "t2_foldseek_evalue",
-    "t2_foldseek_lddt",
-    "t2_tm_score",
-    # Tier 3 — Phynteny
-    "t3_phynteny_category",
-    "t3_phynteny_confidence",
-    "t3_phynteny_score",
-    # Summary
-    "improved_at_tier",   # "1", "2", "3", or "" (still hypothetical)
-]
-
 def _save_delta_report(
     candidate_id: str,
     sample_id:    str,
     tier1:        dict,
     tier2:        dict,
     tier3:        dict,
-    phynteny_c:   float,    # from config — NOT the module constant
     path:         Path,
 ) -> None:
     """
@@ -913,7 +650,6 @@ def _save_delta_report(
     improved_at_tier:
         "1" — Pharokka gave a non-hypothetical annotation
         "2" — Phold upgraded a Pharokka hypothetical
-        "3" — Phynteny predicted a category with confidence ≥ phynteny_c
         ""  — still hypothetical / unknown after all three tiers
     """
     p1_map: dict[str, dict] = {
@@ -924,10 +660,7 @@ def _save_delta_report(
         r.get("locus_tag", "").strip(): r
         for r in tier2.get("phold_rows", [])
     }
-    p3_map: dict[str, dict] = {
-        r.get("locus_tag", "").strip(): r
-        for r in tier3.get("phynteny_rows", [])
-    }
+    p3_map: dict[str, dict] = {}
 
     all_loci = sorted(set(p1_map) | set(p2_map) | set(p3_map))
 
@@ -939,20 +672,12 @@ def _save_delta_report(
 
         t1_annot = r1.get("annot", "").strip()
         t2_prod  = r2.get("product", "").strip()
-        t3_cat   = r3.get("phynteny_category", "").strip()
 
         t1_annotated = t1_annot.lower() not in _UNKNOWN_CATS and t1_annot != ""
         t2_annotated = t2_prod.lower()  not in _UNKNOWN_CATS and t2_prod  != ""
-        try:
-            t3_conf = float(r3.get("phynteny_confidence", 0) or 0)
-        except (ValueError, TypeError):
-            t3_conf = 0.0
-        # Use phynteny_c from config — not a hardcoded module constant
-        t3_predicted = (
-            t3_cat.lower() not in _UNKNOWN_CATS
-            and t3_cat != ""
-            and t3_conf >= phynteny_c
-        )
+        t3_conf = 0.0
+        t3_cat  = ""
+        t3_predicted = False
 
         if t1_annotated:
             improved = "1"
@@ -977,9 +702,6 @@ def _save_delta_report(
             "t2_foldseek_evalue":       r2.get("foldseek_evalue",      ""),
             "t2_foldseek_lddt":         r2.get("foldseek_lddt",        ""),
             "t2_tm_score":              r2.get("tm_score",             ""),
-            "t3_phynteny_category":     t3_cat,
-            "t3_phynteny_confidence":   r3.get("phynteny_confidence",  ""),
-            "t3_phynteny_score":        r3.get("phynteny_score",       ""),
             "improved_at_tier":         improved,
         })
 
@@ -1026,7 +748,6 @@ def _find_phold_per_cds_tsv(
 def _print_completion_panel(
     candidate_id:  str,
     gbk_phold:     Path,
-    gbk_phynteny:  Optional[Path],
     pharokka_dir:  Path,
     plots_dir:     Path,
     tier1:         dict,
@@ -1069,7 +790,6 @@ def _print_completion_panel(
         )
         pct3 = f"{final / total * 100:.1f}%"
         text.append(
-            f"  Tier 3 Phynteny  : +{p3:>3}  → {final:>4}/{total} ({pct3})\n",
             style="bold green",
         )
     text.append(
@@ -1078,10 +798,7 @@ def _print_completion_panel(
     )
     text.append("GBK (Phold)    : ", style="dim white")
     text.append(str(gbk_phold) + "  ← canonical output\n", style="white")
-    text.append("GBK (Phynteny) : ", style="dim white")
     text.append(
-        (str(gbk_phynteny) if gbk_phynteny else "not produced")
-        + "  ← /phynteny_* only\n",
         style="white",
     )
     text.append("GFF            : ", style="dim white")

@@ -91,7 +91,6 @@ class AnnotateConfig:
     phold_finetune:      bool  = True
     phold_batch_size:    int   = 1
     phold_sensitivity:   float = 9.5
-    phynteny_confidence: float = 0.8
     genetic_code:        int   = 11
 
 
@@ -101,7 +100,6 @@ class DatabaseConfig:
     pharokka: Path           = Path("databases/pharokka_db")
     genomad:  Path           = Path("databases/genomad_db")
     phold:    Path           = Path("databases/phold_db")
-    phynteny: Path           = Path("databases/phynteny_db")
     kraken2:  Optional[Path] = None
 
 
@@ -217,7 +215,6 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
         cfg.databases.pharokka = _db("pharokka", cfg.databases.pharokka)
         cfg.databases.genomad  = _db("genomad",  cfg.databases.genomad)
         cfg.databases.phold    = _db("phold",    cfg.databases.phold)
-        cfg.databases.phynteny = _db("phynteny", cfg.databases.phynteny)
         if "kraken2" in db:
             cfg.databases.kraken2 = cfg.workdir / db["kraken2"]
 
@@ -291,7 +288,6 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
         cfg.annotate.phold_finetune      = bool( a.get("phold_finetune",      cfg.annotate.phold_finetune))
         cfg.annotate.phold_batch_size    = int(  a.get("phold_batch_size",    cfg.annotate.phold_batch_size))
         cfg.annotate.phold_sensitivity   = float(a.get("phold_sensitivity",   cfg.annotate.phold_sensitivity))
-        cfg.annotate.phynteny_confidence = float(a.get("phynteny_confidence", cfg.annotate.phynteny_confidence))
         cfg.annotate.genetic_code        = int(  a.get("genetic_code",        cfg.annotate.genetic_code))
 
     return cfg

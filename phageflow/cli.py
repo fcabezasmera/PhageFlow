@@ -634,13 +634,6 @@ def cmd_run(config, workdir, output_dir, reports_dir, threads, force, project,
 
 
 # ---------------------------------------------------------------------------
-# assembly-refine
-# ---------------------------------------------------------------------------
-
-@cli.command("assembly-refine")
-@common_options
-@reads_options
-@click.option("--s1", "s1_path", default=None, type=click.Path())
 def cmd_assembly_refine(config, workdir, output_dir, reports_dir, threads,
                         force, project, sample_id, r1_path, r2_path, s1_path):
     """Iterative assembly refinement using annotation_ready candidates as anchors.
