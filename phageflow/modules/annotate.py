@@ -322,7 +322,7 @@ def _run_pharokka(cfg, candidate_id, genome, pharokka_dir, gbk_out,
         "-d",        str(pharokka_db),
         "-p",        candidate_id,
         "--threads", str(cfg.threads),
-        "--genetic_code", str(genetic_code),
+        "--coding_table", str(genetic_code),
         "--force",
     ]
 
@@ -581,7 +581,7 @@ def _parse_pharokka_per_cds(pharokka_dir: Path, candidate_id: str) -> dict:
     summary_tsv = pharokka_dir / f"{candidate_id}_cds_functions.tsv"
 
     # Candidate column names for the locus identifier (version-dependent)
-    _LOCUS_COLS = ("locus_tag", "gene", "ID", "id", "seq_id")
+    _LOCUS_COLS = ("gene", "locus_tag", "ID", "id", "seq_id")  # Pharokka uses "gene" column
 
     cds_rows: list[dict] = []
     locus_col: str = "locus_tag"   # default; will be resolved below
@@ -669,11 +669,24 @@ def _parse_phold_per_cds(
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
             phold_rows.append(row)
-            locus   = row.get("locus_tag", "").strip()
-            product = row.get("product",   "").strip().lower()
+            # Phold uses "cds_id" not "locus_tag"
+            locus   = (row.get("cds_id") or row.get("locus_tag") or "").strip()
+            product = row.get("product", "").strip().lower()
             conf    = row.get("annotation_confidence", "").strip().lower()
+            source  = row.get("annotation_source", "").strip().lower()
 
-            if locus in pharokka_hypo and product not in _UNKNOWN_CATS and product:
+            # Count as upgraded if:
+            # 1. Was hypothetical in Pharokka
+            # 2. Phold assigned a non-hypothetical product
+            # 3. annotation_source is NOT "pharokka" (i.e. Phold added new info)
+            #    OR confidence is high/medium (Phold confirmed with structure)
+            is_new_annotation = source != "pharokka" or conf in (
+                _PHOLD_HIGH_CONF, _PHOLD_MEDIUM_CONF
+            )
+            if (locus in pharokka_hypo
+                    and product not in _UNKNOWN_CATS
+                    and product
+                    and is_new_annotation):
                 upgraded += 1
                 if conf == _PHOLD_HIGH_CONF:
                     high_conf += 1
@@ -741,7 +754,7 @@ def _save_delta_report(
         for r in tier1.get("cds_rows", [])
     }
     p2_map: dict[str, dict] = {
-        r.get("locus_tag", "").strip(): r
+        (r.get("cds_id") or r.get("locus_tag") or "").strip(): r
         for r in tier2.get("phold_rows", [])
     }
     p3_map: dict[str, dict] = {}
@@ -902,6 +915,16 @@ def _print_completion_panel(
         padding=(0, 2),
         width=120,
     ))
+
+# ── Delta report headers ─────────────────────────────────────────────────────────
+
+_DELTA_HEADERS = [
+    "candidate_id", "locus_tag",
+    "t1_annot", "t1_phrog", "t1_category", "t1_vfdb_hit", "t1_card_hit",
+    "t2_product", "t2_phrog_category", "t2_annotation_confidence",
+    "t2_foldseek_evalue", "t2_foldseek_lddt", "t2_tm_score",
+    "improved_at_tier",
+]
 
 # ── Aggregate summary TSV ─────────────────────────────────────────────────────
 
