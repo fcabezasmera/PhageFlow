@@ -590,10 +590,12 @@ def _download_by_taxids(taxids: list[int], dest_dir: Path, rpt_dir: Path) -> Lis
 def _classify_kraken2(sample_id, r1, r2, db, tmp_dir, rpt_dir, log_f, threads) -> tuple:
     report = rpt_dir / f"{sample_id}_k2.report"
     k2_out = tmp_dir  / f"{sample_id}_k2.tsv"
+    un_r1 = tmp_dir / f"{sample_id}_unclassified_1.fastq"
+    un_r2 = tmp_dir / f"{sample_id}_unclassified_2.fastq"
     run_silent([
         "kraken2", "--db", str(db), "--report", str(report),
         "--output", str(k2_out),
-        "--unclassified-out", f"{tmp_dir}/{sample_id}_unclassified#.fastq",
+        "--unclassified-out", str(tmp_dir / f"{sample_id}_unclassified#.fastq"),
         "--paired", "--confidence", "0.5", "--minimum-hit-groups", "3",
         "--threads", str(threads), str(r1), str(r2),
     ], log_file=log_f, check=False)
