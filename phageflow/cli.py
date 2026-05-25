@@ -452,6 +452,27 @@ def cmd_viral_id(config, workdir, output_dir, reports_dir, threads, force, proje
 
 
 # ---------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------
+@cli.command("coverage")
+@common_options
+@click.option("--sample-id", default=None,
+              help="Sample identifier (derived from R1 filename when omitted).")
+@click.option("--r1", "r1_path", required=True, type=click.Path(exists=True),
+              help="R1 FASTQ (post-host-removal).")
+@click.option("--r2", "r2_path", required=True, type=click.Path(exists=True),
+              help="R2 FASTQ (post-host-removal).")
+@click.option("--contigs", required=True, type=click.Path(exists=True),
+              help="NR contigs FASTA (output of assembly step).")
+def cmd_coverage(config, workdir, output_dir, reports_dir, threads, force, project,
+                 sample_id, r1_path, r2_path, contigs):
+    """Pre-assembly coverage profiling (CoverM)."""
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    sid = _resolve_sample_id(sample_id, r1_path)
+    from phageflow.modules.coverage import run
+    run(cfg, sample_id=sid, r1=Path(r1_path), r2=Path(r2_path),
+        contigs=Path(contigs), force=force)
+# ---------------------------------------------------------------------------
 # quality
 # ---------------------------------------------------------------------------
 
