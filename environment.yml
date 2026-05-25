@@ -45,7 +45,7 @@ dependencies:
   - checkv>=1.0
   - mash>=2.3
   - minimap2>=2.24
-  - blast>=2.14
+  - blast>=2.14          # provides blastn + makeblastdb (quality.py dereplication)
 
   # ── Module 06 — Annotation ───────────────────────────────────────────────────
   - pharokka>=1.7

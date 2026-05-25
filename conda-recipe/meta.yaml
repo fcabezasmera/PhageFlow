@@ -53,7 +53,7 @@ requirements:
     - checkv >=1.1
     - mash >=2.3
     - minimap2 >=2.24
-    - blast >=2.14
+    - blast >=2.14          # provides blastn + makeblastdb
     # ── Annotation ───────────────────────────────────────────────────────────
     - pharokka >=1.9
     - phold >=1.2
