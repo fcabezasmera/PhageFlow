@@ -277,8 +277,6 @@ def cli():
       run             Execute all modules for samples in a directory
 
     \b
-    Utilities:
-      check-tools     Verify all required tools are installed
       config          Copy default config.yaml template
       init            Initialise a new project directory
     """
@@ -631,95 +629,6 @@ def cmd_run(config, workdir, output_dir, reports_dir, threads, force, project,
         accessions=accs,
         from_module=from_module,
     )
-
-
-# ---------------------------------------------------------------------------
-def cmd_assembly_refine(config, workdir, output_dir, reports_dir, threads,
-                        force, project, sample_id, r1_path, r2_path, s1_path):
-    """Iterative assembly refinement using annotation_ready candidates as anchors.
-
-    Run AFTER quality.  --sample-id is optional.
-    """
-    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
-    sid = _resolve_sample_id(sample_id, r1_path)
-    from phageflow.modules.assembly_refine import run
-    run(cfg, sample_id=sid,
-        r1=Path(r1_path), r2=Path(r2_path),
-        s1=Path(s1_path) if s1_path else None,
-        force=force)
-
-
-# ---------------------------------------------------------------------------
-# check-tools
-# ---------------------------------------------------------------------------
-
-@cli.command("check-tools")
-@click.option("-c", "--config", default="config/config.yaml", show_default=True)
-def cmd_check_tools(config):
-    """Verify all required tools are installed and report versions."""
-    from phageflow.utils.tools import check_tool, get_tool_version
-    log_header(__version__)
-    log_step("Checking required tools")
-
-    _check_samtools_version()
-
-    TOOLS: dict[str, list[tuple[str, Optional[str], str]]] = {
-        "QC":         [("fastp", "--version", ""), ("fastqc", "--version", ""),
-                       ("multiqc", "--version", "")],
-        "Host removal": [("bwa-mem2", "version", ""), ("samtools", "--version", "must be ≥1.15"),
-                         ("seqtk", None, ""), ("pigz", "--version", "optional")],
-        "Assembly":   [("spades.py", "--version", ""), ("megahit", "--version", ""),
-                       ("cd-hit-est", None, "")],
-        "Viral ID":   [("genomad", "--version", "")],
-        "Quality":    [("checkv", None, ""), ("mash", "--version", ""),
-                       ("seqkit", "--version", "")],
-        "Annotation": [("pharokka.py", "--version", ""), ("phold", "--version", ""),
-                       ("phynteny_transformer", "--version", ""), ("dnaapler", "--version", "")],
-        "Safety":     [("abricate", "--version", "")],
-        "Databases":  [("datasets", "version", "NCBI datasets CLI"),
-                       ("kraken2", "--version", "optional")],
-    }
-
-    all_ok = True
-    for category, tool_list in TOOLS.items():
-        for tool, flag, hint in tool_list:
-            found = check_tool(tool)
-            if found:
-                ver = get_tool_version(tool, flag) if flag else "(installed)"
-                log_ok(f"  [{category:14}] {tool:28s} {ver}")
-            else:
-                suffix = f"  ← {hint}" if hint else ""
-                log_warn(f"  [{category:14}] {tool:28s} NOT FOUND{suffix}")
-                if tool not in ("pigz", "kraken2", "datasets"):
-                    all_ok = False
-
-    n_total = multiprocessing.cpu_count()
-    print()
-    log_info(f"System  : {n_total} logical CPU(s) | default threads = {_AUTO_THREADS}")
-    print()
-    if all_ok:
-        log_ok("All required tools found.")
-    else:
-        log_warn("Some required tools are missing. Run: conda activate phageflow")
-
-
-def _check_samtools_version() -> None:
-    try:
-        r = subprocess.run(["samtools", "--version"],
-                           capture_output=True, text=True, timeout=10)
-        first = r.stdout.strip().split("\n")[0]
-        parts = first.split()
-        if len(parts) >= 2:
-            ver_str = parts[1].split("-")[0]
-            major, minor = (int(x) for x in ver_str.split(".")[:2])
-            if (major, minor) < (1, 15):
-                log_warn(
-                    f"\n  *** CRITICAL: samtools {ver_str} on PATH is the LEGACY version ***\n"
-                    "  Fix: mamba install -n phageflow 'samtools>=1.15'\n"
-                )
-    except Exception:
-        log_warn("  Could not determine samtools version — ensure ≥1.15 is active.")
-
 
 # ---------------------------------------------------------------------------
 # config
