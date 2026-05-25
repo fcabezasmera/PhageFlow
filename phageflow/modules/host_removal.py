@@ -90,23 +90,15 @@ def run(
         require_tools(*TOOLS_K2)
         db = kraken_db or cfg.databases.kraken2
         if not db or not Path(db).exists():
-            # Passthrough: sin referencia de host ni Kraken2 DB.
-            log_warn("  No host reference or Kraken2 DB → PASSTHROUGH (reads unchanged)")
-            log_warn("  Host removal skipped — all reads treated as phage reads")
-            import shutil as _sh
-            _sh.copy2(str(r1), str(r1_out))
-            _sh.copy2(str(r2), str(r2_out))
-            singleton_out.write_bytes(b"")
-            _n = _count_reads_fastq(r1_out, cfg.threads)
-            _pt_stats = {
-                "reads_in": str(_n * 2), "reads_phage": str(_n * 2),
-                "reads_singleton": "0", "pct_host": "0.00%",
-                "pct_phage": "100.00%", "pct_singleton": "0.00%",
-            }
-            _save_tsv({**_pt_stats, "sample": sample_id, "mode": "passthrough"},
-                      rpt_dir / "host_removal_summary.tsv")
-            log_step(f"Module 02 completed ✓  [{sample_id}]  (passthrough — no host)")
-            return r1_out, r2_out, singleton_out
+            log_error(
+                "  No host reference provided and no Kraken2 database found.\n"
+                "  Provide at least one of:\n"
+                "    --accessions GCF_XXXXXXXX.X   (NCBI accession)\n"
+                "    --host-file /path/to/host.fasta\n"
+                "    --kraken-db /path/to/k2_db\n"
+                "  Or set databases.kraken2 in config.yaml"
+            )
+            sys.exit(1)
         log_info(f"  mode: Kraken2  ·  db: {Path(str(db)).name}")
         if cfg.host_removal.kraken2_postfilter:
             log_info("  Kraken2 postfilter: bwa-mem2 active (recovers DTR/ITR singletons)")
