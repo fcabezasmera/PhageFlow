@@ -135,6 +135,7 @@ def run(
                 # into combined_hosts.fasta. Keeps host_genomes/ clean.
                 _cleanup_ncbi_download(host_dir)
             progress.advance(task)
+            log_ok("  [1/3] bwa-mem2 — reference index ready")
 
             progress.update(task, description="[2/3] bwa-mem2 — streaming alignment")
             stats = _run_bwa_pipeline(
@@ -142,10 +143,12 @@ def run(
                 tmp_dir, log_f, cfg.threads,
             )
             progress.advance(task)
+            log_ok("  [2/3] bwa-mem2 — alignment + extraction complete")
 
             progress.update(task, description="[3/3] Level A  — contamination check")
             _level_a_check(r1_out, r2_out, rpt_dir, sample_id, cfg, active_warnings)
             progress.advance(task)
+            log_ok("  [3/3] Level A  — contamination check complete")
 
         else:
             progress.update(task, description="[1/2] Kraken2  — classifying reads")
@@ -153,6 +156,7 @@ def run(
                 sample_id, r1, r2, Path(db), tmp_dir, rpt_dir, log_f, cfg.threads
             )
             progress.advance(task)
+            log_ok("  [1/2] Kraken2  — classification complete")
 
             if cfg.host_removal.kraken2_postfilter:
                 r1_k2 = tmp_dir / f"{sample_id}_k2_R1.fastq.gz"
@@ -180,6 +184,7 @@ def run(
                     sample_id, r1, r2, r1_out, r2_out, report, k2_out, tmp_dir, log_f,
                 )
                 progress.advance(task)
+                log_ok("  [2/2] seqtk    — phage reads extracted")
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     try:
@@ -195,6 +200,13 @@ def run(
     _print_completion_panel(sample_id, r1_out, r2_out, singleton_out,
                             rpt_dir, stats, mode, active_warnings)
     log_step(f"Module 02 completed ✓  [{sample_id}]")
+    log_info(
+        f"  Next: phageflow assembly"
+        f"  --r1 {r1_out}"
+        f"  --r2 {r2_out}"
+        f"  --s1 {singleton_out}"
+        f"  -o <output_dir>"
+    )
     return r1_out, r2_out, singleton_out
 
 
@@ -735,7 +747,21 @@ def _print_completion_panel(
             if v >= warn: return f"[bold yellow]{val}[/bold yellow]"
             return f"[bold red]{val}[/bold red]"
         except: return str(val)
-    def _f(val): return "[dim]N/A[/dim]" if str(val) in ("N/A","","None") else str(val)
+    def _f(val):
+
+        s = str(val)
+
+        if s in ("N/A", "", "None"):
+
+            return "[dim]N/A[/dim]"
+
+        try:
+
+            return f"{int(s):,}"
+
+        except ValueError:
+
+            return s
 
     n_in  = _f(stats.get("reads_in",    "N/A"))
     n_out = _f(stats.get("reads_phage", "N/A"))
