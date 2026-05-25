@@ -220,7 +220,7 @@ def _parse_fastp_json(json_f: Path) -> dict:
     empty = {
     "reads_in": "0", "reads_out": "0", "pct_pass": "0.0%",
     "gc_pct":   "N/A", "q20_pct": "N/A", "q30_pct": "N/A",
-    "bp_out":   "0",   "est_coverage": "N/A",
+    "bp_out":   "0",   "dup_pct": "N/A", "est_coverage": "N/A",
     }  
     
     if not json_f.exists():
@@ -235,6 +235,7 @@ def _parse_fastp_json(json_f: Path) -> dict:
         bp  = af.get("total_bases", 0)
         pp  = ro / ri * 100 if ri else 0.0
         cov = bp / _REF_GENOME_BP if bp else 0.0
+        dup = d.get("duplication", {}).get("rate", 0) * 100
         return {
             "reads_in":     f"{ri:,}",
             "reads_out":    f"{ro:,}",
@@ -243,6 +244,7 @@ def _parse_fastp_json(json_f: Path) -> dict:
             "q20_pct":      f"{af.get('q20_rate',   0) * 100:.1f}%",
             "q30_pct":      f"{af.get('q30_rate',   0) * 100:.1f}%",
             "bp_out":       f"{bp:,}",
+            "dup_pct":      f"{dup:.1f}%",
             "est_coverage": f"{cov:.0f}x" if cov else "N/A",
         }
     except Exception:
@@ -267,6 +269,12 @@ def _check_warnings(m: dict, active_warnings: list[str]) -> None:
         msg = f"Q30 rate {m['q30_pct']} < {_Q30_WARN}% — assembly contiguity may suffer"
         log_warn(f"  ⚠ {msg}"); active_warnings.append(msg)
         
+    dup = _pct("dup_pct")
+    if dup > 70.0:
+        log_info(
+            f"  ℹ Duplication {m.get('dup_pct','?')} — normal at high phage coverage (Head et al. 2014). NOT deduplicated."
+        )
+
     try:
         ro = int(str(m.get("reads_out", "0")).replace(",", ""))
     except (ValueError, TypeError):
@@ -296,7 +304,7 @@ def _print_completion_panel(
         f"  pass={_c(m.get('pct_pass','0%'), _PASS_GOOD, _PASS_WARN)}",
         f"  [cyan]Quality :[/cyan] Q20={_c(m.get('q20_pct','0%'), _Q20_GOOD, _Q20_WARN)}"
         f"  Q30={_c(m.get('q30_pct','0%'), _Q30_GOOD, _Q30_WARN)}"
-        f"  GC={m.get('gc_pct','N/A')}",
+        f"  GC={m.get('gc_pct','N/A')}  dup={m.get('dup_pct','N/A')}",
         f"  [cyan]Yield   :[/cyan] {m.get('bp_out','?')} bp  "
         f"≈{m.get('est_coverage','?')} on 50 kb phage  "
         f"[dim](÷3 for 150 kb)[/dim]",
@@ -322,7 +330,7 @@ def _print_completion_panel(
 
 _TSV_HEADERS = [
     "sample_id", "reads_in", "reads_out", "pct_pass",
-    "q20_pct", "q30_pct", "gc_pct", "bp_out", "est_coverage_50kb",
+    "q20_pct", "q30_pct", "gc_pct", "dup_pct", "bp_out", "est_coverage_50kb",
 ]
 
 
@@ -344,6 +352,7 @@ def _save_tsv(sample_id: str, m: dict, path: Path) -> None:
         "q20_pct":           m.get("q20_pct", ""),
         "q30_pct":           m.get("q30_pct", ""),
         "gc_pct":            m.get("gc_pct", ""),
+        "dup_pct":           m.get("dup_pct", ""),
         "bp_out":            m.get("bp_out", ""),
         "est_coverage_50kb": m.get("est_coverage", ""),
     }
