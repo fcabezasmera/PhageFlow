@@ -1,4 +1,49 @@
-"""Module"""
+"""PhageFlow Module 02 — Host read removal.
+
+Goal: remove host-derived reads from paired-end Illumina reads, retaining
+reads of non-host origin for downstream assembly. No assumption is made
+about the composition of the non-host fraction at this stage.
+
+Two modes are available:
+
+bwa-mem2 (RECOMMENDED)
+  Maps reads against one or more host reference genome(s).
+  Reads that do NOT map are retained as candidate non-host reads.
+  Singletons (one mate maps, one does not) are retained separately
+  for use as --s1 input to SPAdes, which is critical for recovering
+  terminal repeats (DTR/ITR) of circular viral genomes.
+
+  Alignment uses permissive parameters (-A 1 -B 2 -O 2,2) to maximise
+  sensitivity for divergent host strains. Using default BWA parameters
+  risks retaining divergent host reads as false non-host signal.
+  Schmieder & Edwards 2011 (Bioinformatics 27:863) — DeconSeq;
+  Li 2013 (arXiv:1303.3997) — BWA-MEM parameter rationale.
+
+  Level A post-check: subsamples 50,000 reads and screens with Kraken2
+  to detect residual bacterial contamination. Diagnostic only — no reads
+  are removed. Warns if bacterial fraction exceeds contamination_warn_pct.
+
+Kraken2 (alternative)
+  Taxonomic classification against a k-mer database.
+  Unclassified reads + viral-classified reads are retained.
+  Appropriate when no host genome is available.
+
+  Parameters: --confidence 0.5 --minimum-hit-groups 3
+  Strict confidence prevents false-positive host classification of
+  divergent viral reads with partial k-mer matches to bacterial sequences.
+  Wood et al. 2019 (Genome Biol 20:257) — Kraken2.
+
+  Optional Level B post-filter: bwa-mem2 alignment against bacterial
+  species detected at >postfilter_min_pct by Kraken2. Recovers singletons
+  lost by Kraken2 paired-end classification of terminal repeat reads.
+
+Singleton recovery rationale
+  In paired-end sequencing of circular genomes with DTR/ITR, read pairs
+  that span the terminal repeat junction may have one mate map to host
+  and one mate fail to map (or map to the virus). Retaining singletons
+  ensures these reads contribute to assembly of genome termini.
+  Antipov et al. 2016 (Bioinformatics 32:i60) — SPAdes plasmidSPAdes.
+"""
 from __future__ import annotations
 import subprocess
 import sys
@@ -25,10 +70,15 @@ TOOLS_K2      = ["kraken2", "seqtk"]
 FASTA_EXTS    = {".fasta", ".fa", ".fna", ".fas"}
 TAXID_VIRUSES = 10239
 
-_PHAGE_GOOD      = 90.0
-_PHAGE_WARN      = 50.0
-_PHAGE_CRITICAL  = 20.0
-_K2_UNCLASS_WARN = 0.30
+# Non-host retention thresholds
+# These are agnostic to sample composition — the non-host fraction
+# may be viral, plasmid, or other non-host sequence.
+_NONHOST_GOOD     = 50.0   # green: >50% retained
+_NONHOST_WARN     = 20.0   # yellow: <20% may indicate reference mismatch
+_NONHOST_CRITICAL =  5.0   # red: <5% almost certainly a reference error
+
+# Kraken2: warn if >80% unclassified (DB may lack the host genome)
+_K2_UNCLASS_WARN  = 0.80
 _MIN_READS       = 50_000
 _SAMTOOLS_MIN_VERSION = (1, 15)
 _LEVEL_A_SUBSAMPLE    = 50_000
@@ -311,7 +361,11 @@ def _run_bwa_pipeline(
     sort_prefix = tmp_dir / f"{sample_id}.sort"
 
     cmd = (
-        f"bwa-mem2 mem -t {threads} -M {combined} {r1} {r2} "
+        # Permissive alignment parameters for host removal sensitivity:
+    # -A 1 -B 2 -O 2,2: lower mismatch/gap penalties capture divergent host strains
+    # that default parameters would fail to map, preventing false non-host retention.
+    # Schmieder & Edwards 2011 (Bioinformatics 27:863)
+    f"bwa-mem2 mem -t {threads} -A 1 -B 2 -O 2,2 -M {combined} {r1} {r2} "
         f"| samtools view -@ {min(threads,8)} -bF 2304 -u "
         f"| samtools sort -@ {min(threads,8)} -n -u -T {sort_prefix} - "
         f"| samtools fastq -@ {min(threads,4)} -N "
@@ -647,7 +701,7 @@ def _validate_output(r1_out, r2_out, singleton_out, stats, active_warnings) -> N
         n = int(stats.get("reads_phage", 0))
         if n < _MIN_READS:
             msg = (f"Only {n:,} phage reads retained — < {_MIN_READS:,} "
-                   "may be insufficient for 50× on 150 kb genome.")
+                   "may be insufficient for assembly of large viral genomes (>100 kb at 50×).")
             log_warn(f"  [validate] {msg}"); active_warnings.append(msg)
         else:
             log_ok(f"  [validate] {n:,} phage reads retained — OK")
@@ -656,21 +710,30 @@ def _validate_output(r1_out, r2_out, singleton_out, stats, active_warnings) -> N
 def _check_warnings(stats, mode, active_warnings) -> None:
     try:
         ph = float(stats.get("pct_phage", "0").rstrip("%"))
-        if ph < _PHAGE_CRITICAL:
-            msg = (f"CRITICAL: phage fraction {stats.get('pct_phage')} < "
-                   f"{_PHAGE_CRITICAL}% — assembly failure highly probable.")
+        if ph < _NONHOST_CRITICAL:
+            msg = (
+                f"CRITICAL: only {stats.get('pct_phage')} of reads passed host removal "
+                f"(threshold {_NONHOST_CRITICAL}%). Possible reference genome mismatch "
+                "or near-complete host contamination. Verify --accessions or --host-file."
+            )
             log_warn(f"  {msg}"); active_warnings.append(msg)
-        elif ph < _PHAGE_WARN:
-            msg = (f"Phage fraction {stats.get('pct_phage')} < {_PHAGE_WARN}% — "
-                   "check reference genome and sample purity.")
+        elif ph < _NONHOST_WARN:
+            msg = (
+                f"Low non-host fraction: {stats.get('pct_phage')} "
+                f"(threshold {_NONHOST_WARN}%). "
+                "Check that the host reference matches the propagation strain."
+            )
             log_warn(f"  {msg}"); active_warnings.append(msg)
     except (ValueError, AttributeError): pass
     if mode == "kraken2":
         try:
             n_t = int(stats.get("reads_in", 0)); n_u = int(stats.get("k2_unclass", 0))
-            if n_t and n_u / n_t < _K2_UNCLASS_WARN:
-                msg = (f"< {_K2_UNCLASS_WARN * 100:.0f}% unclassified — phage reads may be "
-                       "in Kraken2 DB. Use bwa-mem2 mode with --host-file.")
+            if n_t and n_u / n_t > _K2_UNCLASS_WARN:
+                msg = (
+                    f"> {_K2_UNCLASS_WARN * 100:.0f}% reads unclassified by Kraken2 — "
+                    "host genome may not be in the database. "
+                    "Consider bwa-mem2 mode with --accessions for accurate host removal."
+                )
                 log_warn(f"  [Kraken2] {msg}"); active_warnings.append(msg)
         except (ValueError, TypeError): pass
 
@@ -706,7 +769,7 @@ def _print_completion_panel(
     lines = [
         "[bold]Key metrics[/bold]",
         f"  [cyan]{unit.capitalize():12s}:[/cyan] {n_in} → {n_out}"
-        f"  phage={_c(ph, _PHAGE_GOOD, _PHAGE_WARN)}  host={_f(ho)}",
+        f"  phage={_c(ph, _NONHOST_GOOD, _NONHOST_WARN)}  host={_f(ho)}",
         f"  [cyan]Singletons  :[/cyan] {n_sin} retained  [dim](pass to assembly --s1)[/dim]",
         f"  [cyan]Mode        :[/cyan] {mode}",
     ]
