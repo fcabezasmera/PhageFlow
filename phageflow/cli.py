@@ -141,7 +141,6 @@ def _load(
         from importlib.resources import files as _res_files
         _default = Path(str(_res_files("phageflow.config").joinpath("default_config.yaml")))
         if _default.exists():
-            log_info(f"  Config   : bundled default ('{cfg_path}' not found — OK)")
             cfg_path = _default
             _using_bundled = True
         else:

@@ -1,4 +1,62 @@
-"""Module"""
+"""PhageFlow Module 06 — Phage genome annotation (Pharokka → Phold).
+
+Goal: functionally annotate annotation-ready viral genomes using a
+two-tier pipeline that combines database-based gene calling with
+structure-informed protein function prediction.
+
+No assumption is made about the viral family at this stage — the pipeline
+handles all phage families including those with non-standard genetic codes.
+
+Tier 1: Pharokka (Bouras et al. 2023, Bioinformatics 39:btac776)
+  Gene calling:
+    Single-contig mode : PHANOTATE — phage-specific ab initio gene caller
+      that models all reading frames simultaneously. Outperforms Prodigal
+      on phage genomes with overlapping genes and non-canonical starts.
+      McNair et al. 2019 (Bioinformatics 35:4537).
+    Multi-contig mode  : prodigal-gv — handles alternative genetic codes
+      (code 15 for CrAss-like, code 4 for some Myoviridae) automatically.
+      Camargo et al. 2023 (Nat Biotechnol 41:1783).
+  Function assignment:
+    MMseqs2 vs PHROGs : Phage HMM + Reference database Orthologous Groups.
+      Terzian et al. 2021 (Nucleic Acids Res 49:D92).
+    PyHMMER vs PHROGs : HMM-based annotation for borderline hits.
+      Larralde & Zeller 2023 (Bioinformatics 39:btad419).
+  Reorientation:
+    dnaapler (single-contig only): reorients circular genome to canonical
+      start (large terminase subunit). Ensures consistent genome maps
+      and GBK coordinates across samples.
+      Bouras et al. 2023 — dnaapler documentation.
+  Genetic code:
+    Read from genome FASTA header [genetic_code=N] (set by viral_id).
+    Passed to Pharokka --genetic_code. Critical for CrAss-like phages
+    (code 15, TGA=Trp) where default code 11 truncates proteins at TGA.
+    Yutin et al. 2018 (Nat Microbiol 3:1145).
+
+Tier 2: Phold (Bouras et al. 2025, bioRxiv)
+  Structure-informed annotation of hypothetical proteins using:
+    ProstT5       : protein language model generating 3Di structural tokens
+                    from amino acid sequence (no AlphaFold required).
+                    Heinzinger et al. 2023 (Bioinformatics 39:btad436).
+    Foldseek      : ultra-fast structure alignment against PHROGs-3D, CARD,
+                    VFDB, DefenseFinder, and NetFlax databases.
+                    van Kempen et al. 2024 (Nat Biotechnol 42:243).
+    --hyps        : only re-annotates hypothetical proteins from Pharokka.
+                    Conserves compute; does not overwrite confident Pharokka
+                    annotations.
+    --finetune    : phage-finetuned ProstT5 model improves 3Di token quality
+                    for phage proteins vs the base model.
+  annotation_confidence: high / medium / low — primary quality indicator.
+  Delta logic: Phold upgrade = Pharokka hypothetical → non-hypothetical product.
+
+Visualisation
+  Single-contig (complete/circular genomes):
+    phold plot — circular genome map (PNG + SVG), colored by PHROG category.
+    DPI=600 for publication quality.
+  Multi-contig (fragmented/linear genomes):
+    pyGenomeViz — linear multi-track figure, one track per contig, drawn
+    to scale. Same PHROG color palette as phold plot for consistency.
+    Shimoyama 2022 (bioRxiv 2022.11.24.517870).
+"""
 
 from __future__ import annotations
 import csv
@@ -70,11 +128,16 @@ def run(
     genome:    Path,
     force:     bool = False,
 ) -> Path:
-    """Annotate a single phage candidate genome (three tiers + plot)."""
+    """Annotate a single phage candidate genome (Pharokka → Phold + plot)."""
     require_tools(*TOOLS)
 
     genome       = Path(genome)
     candidate_id = genome.stem
+    # Read genetic_code from FASTA header [genetic_code=N] written by quality.py.
+    # Falls back to cfg.annotate.genetic_code (default 11) if not found.
+    # Critical for CrAss-like phages (code 15, TGA=Trp).
+    genetic_code = _parse_genetic_code_from_fasta(genome,
+                   getattr(cfg.annotate, "genetic_code", 11))
 
     out_dir  = cfg.results(STEP)
     rpt_base = cfg.reports(STEP)           # aggregate TSVs live here
@@ -166,18 +229,6 @@ def run(
         progress.advance(task)
 
         tier3 = {}
-        if tier3:
-            p1, p2, p3 = (
-                tier1.get("annotated", 0),
-                tier2.get("upgraded", 0),
-                tier3["upgraded"],
-            )
-            cum = p1 + p2 + p3
-            tot = tier1.get("total_cds", 0)
-            pct = f"{cum / tot * 100:.1f}%" if tot else "?"
-            log_ok(
-                f"cumulative {cum}/{tot} ({pct})"
-            )
         progress.advance(task)
 
         # 4/4 — Plot (phold circular OR pyGenomeViz linear)
@@ -208,17 +259,43 @@ def run(
     )
 
     log_step(f"Module 06 completed ✓  [{candidate_id}]")
-    log_ok(f"  GBK (Phold)     : {gbk_phold}  ← use for downstream / phold plot")
-    log_ok(
-    )
+    log_ok(f"  GBK (Phold)     : {gbk_phold}")
     log_ok(f"  Delta report    : {delta_path}")
     log_ok(
         f"  GFF             : "
         f"{pharokka_dir / (candidate_id + '.gff')}"
     )
-    log_info("Next: phageflow safety --sample-id <id> --genome <genome.fasta>")
 
     return gbk_phold
+
+# ── Genetic code parser ──────────────────────────────────────────────────────
+
+def _parse_genetic_code_from_fasta(genome: Path, default: int = 11) -> int:
+    """Read genetic_code from FASTA header written by quality.py.
+
+    quality.py writes headers like:
+        >Caudoviricetes_candidate_001 [genetic_code=15] [topology=DTR] ...
+
+    Returns the integer genetic code, or default (11) if not found.
+    Genetic code 15: TGA=Trp (CrAss-like phages, Yutin et al. 2018).
+    Genetic code 4:  TGA=Trp (some Myoviridae).
+    Genetic code 11: standard bacterial/phage (default).
+    """
+    if not genome.exists():
+        return default
+    with open(genome) as f:
+        for line in f:
+            if line.startswith(">"):
+                import re as _re
+                m = _re.search(r"\[genetic_code=(\d+)\]", line)
+                if m:
+                    try:
+                        return int(m.group(1))
+                    except ValueError:
+                        pass
+                break
+    return default
+
 
 # ── Step 1: Pharokka ──────────────────────────────────────────────────────────
 
@@ -232,6 +309,12 @@ def _run_pharokka(cfg, candidate_id, genome, pharokka_dir, gbk_out,
     if not pharokka_db.exists():
         log_warn(f"  [Pharokka] database not found: {pharokka_db}")
 
+    # genetic_code: read from genome FASTA header [genetic_code=N].
+    # Passed via caller (run()) as parameter.
+    # Default 11 (standard); 15 for CrAss-like (TGA=Trp).
+    genetic_code = _parse_genetic_code_from_fasta(genome,
+                   getattr(cfg.annotate, "genetic_code", 11))
+
     cmd = [
         "pharokka.py",
         "-i",        str(genome),
@@ -239,6 +322,7 @@ def _run_pharokka(cfg, candidate_id, genome, pharokka_dir, gbk_out,
         "-d",        str(pharokka_db),
         "-p",        candidate_id,
         "--threads", str(cfg.threads),
+        "--genetic_code", str(genetic_code),
         "--force",
     ]
 
@@ -288,7 +372,7 @@ def _run_phold(cfg, candidate_id, input_gbk, phold_dir, gbk_out, rpt_dir, force)
         "-d", str(phold_db),
         "-t", str(cfg.threads),
         "--hyps",
-        "-s", _PHOLD_SENSITIVITY,
+        "-s", str(getattr(cfg.annotate, "phold_sensitivity", _PHOLD_SENSITIVITY)),
         "-e", _PHOLD_EVALUE,
         "--card_vfdb_evalue", _PHOLD_CARD_EVALUE,
         "--batch_size", str(batch_size),
@@ -790,6 +874,7 @@ def _print_completion_panel(
         )
         pct3 = f"{final / total * 100:.1f}%"
         text.append(
+            f"  Final cumulative : +{p3}  → {final:>4}/{total} ({pct3})\n",
             style="bold green",
         )
     text.append(
@@ -798,9 +883,7 @@ def _print_completion_panel(
     )
     text.append("GBK (Phold)    : ", style="dim white")
     text.append(str(gbk_phold) + "  ← canonical output\n", style="white")
-    text.append(
-        style="white",
-    )
+
     text.append("GFF            : ", style="dim white")
     text.append(
         str(pharokka_dir / f"{candidate_id}.gff") + "\n",

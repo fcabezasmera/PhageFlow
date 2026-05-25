@@ -140,13 +140,6 @@ def run(
     _save_tsv(sample_id, metrics, rpt_dir / "qc_summary.tsv")
     _print_completion_panel(sample_id, r1_out, r2_out, rpt_dir, metrics, active_warnings)
     log_step(f"Module 01 completed ✓  [{sample_id}]")
-    log_info(
-        f"  Next: phageflow host-removal"
-        f"  --r1 {r1_out}"
-        f"  --r2 {r2_out}"
-        f"  --accessions GCF_XXXXXXXX.X"
-        f"  -o <output_dir>"
-    )
     return r1_out, r2_out
 
 def _run_fastp(

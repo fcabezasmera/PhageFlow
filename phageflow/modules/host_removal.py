@@ -240,13 +240,6 @@ def run(
     _print_completion_panel(sample_id, r1_out, r2_out, singleton_out,
                             rpt_dir, stats, mode, active_warnings)
     log_step(f"Module 02 completed ✓  [{sample_id}]")
-    log_info(
-        f"  Next: phageflow assembly"
-        f"  --r1 {r1_out}"
-        f"  --r2 {r2_out}"
-        f"  --s1 {singleton_out}"
-        f"  -o <output_dir>"
-    )
     return r1_out, r2_out, singleton_out
 
 # ── samtools version check ────────────────────────────────────────────────────

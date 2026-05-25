@@ -17,7 +17,6 @@ databases:
   pharokka: databases/pharokka_db
   genomad:  databases/genomad_db
   phold:    databases/phold_db
-  phynteny: databases/phynteny_db
   kraken2:  databases/k2_db
 
 envs:
@@ -107,5 +106,4 @@ annotate:
   phold_finetune: true
   phold_batch_size: 1
   phold_sensitivity: 9.5
-  phynteny_confidence: 0.8
   genetic_code: 11
