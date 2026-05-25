@@ -27,14 +27,14 @@ def _default_threads() -> int:
 class QcConfig:
     # fastp parameters — purified phage PE150
     # Chen 2018; Wick & Holt 2022; Roux 2019 (MIUViG)
-    average_qual:               int  = 22
+    average_qual:               int  = 20   # Q20=99% accuracy (Roux et al. 2019 MIUViG)
     qualified_quality_phred:    int  = 25
-    unqualified_percent_limit:  int  = 10
-    length_required:            int  = 80
-    cut_right_window_size:      int  = 4
+    unqualified_percent_limit:  int  = 15   # lenient to retain divergent-phage reads
+    length_required:            int  = 50   # PE150 default; auto-adjusted by read length
+    cut_right_window_size:      int  = 4    # auto-adjusted by read length
     cut_right_mean_quality:     int  = 25
     correction:                 bool = True
-    overlap_len_require:        int  = 15
+    overlap_len_require:        int  = 15   # auto-adjusted by read length
     overlap_diff_percent_limit: int  = 5
     low_complexity_filter:      bool = True
     complexity_threshold:       int  = 20
@@ -45,7 +45,7 @@ class QcConfig:
 
 @dataclass
 class AssemblyConfig:
-    kmers:      str  = "21,33,55,77,99,127,141"
+    kmers:      str  = "21,33,55,77,99,127"  # SPAdes v4.x max k=127; MEGAHIT extended automatically
     min_length: int  = 200
     iterative_refinement: bool = False
 
@@ -63,12 +63,12 @@ class GenomadConfig:
     min_score:            float = 0.7
     min_hallmarks:        int   = 0
     rescue_min_score:     float = 0.4
-    rescue_min_length_bp: int   = 10_000
+    rescue_min_length_bp: int   = 3_000   # captures Microviridae/Inoviridae (Roux et al. 2019 MIUViG)
     sensitivity:          float = 4.2
     splits:               int   = 0
     disable_find_proviruses:    bool = True
     enable_score_calibration:   bool = True
-    composition:          str   = "virome"
+    composition:          str   = "auto"   # auto-detects composition (Camargo et al. 2023)
     lenient_taxonomy:     bool  = True
 
 
@@ -78,7 +78,7 @@ class CheckvConfig:
     min_viral_genes:     int   = 1
     length_rescue:       int   = 10_000
     min_contig_bp:       int   = 1_500
-    large_nd_rescue_bp:  int   = 30_000
+    large_nd_rescue_bp:  int   = 20_000   # 20 kb: medium phages with no CheckV ref (Roux et al. 2019)
     min_bin_rescue_bp:   int   = 30_000
     min_gene_density:    float = 0.5
     max_kmer_freq:       float = 1.5
@@ -181,6 +181,23 @@ class Config:
 # YAML loader
 # ---------------------------------------------------------------------------
 
+def _find_user_config() -> Optional[Path]:
+    """Look for user-level config at ~/.config/phageflow/config.yaml."""
+    user_cfg = Path.home() / ".config" / "phageflow" / "config.yaml"
+    return user_cfg if user_cfg.exists() else None
+
+
+def _find_db_path() -> Optional[Path]:
+    """Resolve database path from environment variable PHAGEFLOW_DB."""
+    import os
+    db_env = os.environ.get("PHAGEFLOW_DB")
+    if db_env:
+        p = Path(db_env)
+        if p.exists():
+            return p
+    return None
+
+
 def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
     """Load config.yaml and return a fully resolved Config object."""
     with open(config_path) as f:
@@ -204,6 +221,15 @@ def load_config(config_path: Path, workdir: Optional[Path] = None) -> Config:
         if "reports" in d:
             p = d["reports"]
             cfg._reports_dir = Path(p) if Path(p).is_absolute() else cfg.workdir / p
+
+    # databases — environment variable overrides config
+    db_env_path = _find_db_path()
+    if db_env_path:
+        cfg.databases.checkv   = db_env_path / "checkv_db" / "checkv-db-v1.5"
+        cfg.databases.genomad  = db_env_path / "genomad_db"
+        cfg.databases.pharokka = db_env_path / "pharokka_db"
+        cfg.databases.phold    = db_env_path / "phold_db"
+        cfg.databases.kraken2  = db_env_path / "k2_db"
 
     # databases
     if "databases" in raw:

@@ -725,6 +725,102 @@ def cmd_resistance(config, workdir, output_dir, reports_dir, threads, force, pro
     from phageflow.modules.resistance import run
     run(cfg, sample_id=sid, candidate_id=candidate_id, force=force)
 # ---------------------------------------------------------------------------
+# download-databases
+# ---------------------------------------------------------------------------
+@cli.command("download-databases")
+@click.option("-o", "--output-dir", required=True,
+              help="Directory to download databases into.")
+@click.option("--checkv",   is_flag=True, default=False, help="Download CheckV database.")
+@click.option("--genomad",  is_flag=True, default=False, help="Download geNomad database.")
+@click.option("--pharokka", is_flag=True, default=False, help="Download Pharokka database.")
+@click.option("--phold",    is_flag=True, default=False, help="Download Phold database.")
+@click.option("--all",      "all_dbs", is_flag=True, default=False,
+              help="Download all databases (recommended for first-time setup).")
+def cmd_download_databases(output_dir, checkv, genomad, pharokka, phold, all_dbs):
+    """Download PhageFlow databases and write config to ~/.config/phageflow/config.yaml.
+
+    \b
+    Example (first-time setup):
+      phageflow download-databases --all -o ~/phageflow_databases
+
+    \b
+    Example (individual):
+      phageflow download-databases --checkv --genomad -o ~/phageflow_databases
+    """
+    import subprocess
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    dbs_to_download = []
+    if all_dbs or checkv:   dbs_to_download.append("checkv")
+    if all_dbs or genomad:  dbs_to_download.append("genomad")
+    if all_dbs or pharokka: dbs_to_download.append("pharokka")
+    if all_dbs or phold:    dbs_to_download.append("phold")
+
+    if not dbs_to_download:
+        log_warn("No databases selected. Use --all or specify individual databases.")
+        return
+
+    log_step(f"Downloading {len(dbs_to_download)} database(s) to {out}")
+
+    db_paths = {}
+
+    if "checkv" in dbs_to_download:
+        log_info("  [1] CheckV database (~2 GB)")
+        db_dir = out / "checkv_db"
+        subprocess.run(["checkv", "download_database", str(db_dir)], check=True)
+        # CheckV creates checkv-db-vX.X inside — find it
+        subdirs = sorted(db_dir.glob("checkv-db-v*"))
+        db_paths["checkv"] = str(subdirs[-1]) if subdirs else str(db_dir)
+        log_ok(f"  CheckV → {db_paths['checkv']}")
+
+    if "genomad" in dbs_to_download:
+        log_info("  [2] geNomad database (~7 GB)")
+        db_dir = out / "genomad_db"
+        subprocess.run(["genomad", "download-database", str(db_dir)], check=True)
+        db_paths["genomad"] = str(db_dir)
+        log_ok(f"  geNomad → {db_paths['genomad']}")
+
+    if "pharokka" in dbs_to_download:
+        log_info("  [3] Pharokka database (~2 GB)")
+        db_dir = out / "pharokka_db"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["install_databases.py", "-o", str(db_dir)], check=True)
+        db_paths["pharokka"] = str(db_dir)
+        log_ok(f"  Pharokka → {db_paths['pharokka']}")
+
+    if "phold" in dbs_to_download:
+        log_info("  [4] Phold database (~18 GB)")
+        db_dir = out / "phold_db"
+        subprocess.run(["phold", "install", "-d", str(db_dir)], check=True)
+        db_paths["phold"] = str(db_dir)
+        log_ok(f"  Phold → {db_paths['phold']}")
+
+    # Write user config
+    user_cfg_dir = Path.home() / ".config" / "phageflow"
+    user_cfg_dir.mkdir(parents=True, exist_ok=True)
+    user_cfg = user_cfg_dir / "config.yaml"
+
+    # Merge with existing config if present
+    existing = {}
+    if user_cfg.exists():
+        import yaml
+        with open(user_cfg) as f:
+            existing = yaml.safe_load(f) or {}
+
+    existing.setdefault("databases", {})
+    for db, path_str in db_paths.items():
+        existing["databases"][db] = path_str
+
+    import yaml
+    with open(user_cfg, "w") as f:
+        yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
+
+    log_ok(f"  Config written → {user_cfg}")
+    log_step("Database setup complete")
+    log_info(f"  Run: phageflow run --r1 R1.fastq.gz --r2 R2.fastq.gz -o results/")
+
+# ---------------------------------------------------------------------------
 # init
 # ---------------------------------------------------------------------------
 
