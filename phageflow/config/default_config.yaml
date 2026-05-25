@@ -69,15 +69,20 @@ assembly:
 # ─────────────────────────────────────────────────────────────────────────────
 genomad:
   min_score: 0.7
-  min_virus_hallmarks: 0
+  min_virus_hallmarks: 0       # primary filter is score + rescue_length;
+                               # hallmarks=0 retains divergent viruses lacking DB refs
   sensitivity: 4.2
   splits: 0
   rescue_min_score: 0.4
-  rescue_min_length_bp: 10000
+  rescue_min_length_bp: 3000   # 3 kb captures Microviridae/Inoviridae complete genomes
+                               # (Roux et al. 2019 MIUViG; genome size 3-9 kb)
   enable_score_calibration: true
-  composition: virome
+  composition: auto           # auto: geNomad selects calibration based on detected composition (Camargo et al. 2023)
+                               # virome: use only when sample is confirmed >70% viral
   lenient_taxonomy: true
-  disable_find_proviruses: true
+  disable_find_proviruses: true  # provirus detection on post-host-removal contigs
+                               # produces false positives from residual bacteria;
+                               # set false only for lysogeny-focused analyses
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Module 05 — Genome quality and selection (CheckV)

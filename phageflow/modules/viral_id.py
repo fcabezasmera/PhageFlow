@@ -1,4 +1,60 @@
-"""Module"""
+"""PhageFlow Module 04 — Viral contig identification (geNomad).
+
+Goal: classify assembled contigs as viral, prokaryotic, or plasmid.
+No assumption is made about the composition of the input at this stage.
+Contigs from Module 03 may include viral, bacterial, and chimeric sequences.
+
+Tool: geNomad end-to-end (Camargo et al. 2023, Nat Biotechnol 41:1783)
+  geNomad combines a neural network sequence classifier with a marker
+  gene database (hallmarks) to assign virus scores to contigs.
+  Score range: 0.0 (prokaryotic) → 1.0 (viral).
+  Precision at score ≥ 0.7: ~97%% (Camargo et al. 2023, Suppl Fig 2).
+
+Score calibration
+  enable_score_calibration: true — adjusts raw scores based on sample
+    composition to reduce false positives/negatives.
+  composition: auto — geNomad selects calibration based on detected
+    sample composition. Preferred for inputs of unknown composition.
+    Use composition=virome only when the sample is confirmed >70%% viral;
+    virome calibration inflates scores on mixed samples (false positives).
+    Use composition=metagenome for complex environmental metagenomes.
+    Camargo et al. 2023 (Nat Biotechnol 41:1783).
+
+Sensitivity
+  sensitivity: 4.2 — maximum MMseqs2 sensitivity for hallmark detection.
+    Lower values miss hallmark genes in divergent viral sequences.
+    Steinegger & Soding 2017 (Nat Methods 14:1101) — MMseqs2.
+
+Taxonomy
+  lenient_taxonomy: true — enables classification beyond the ICTV
+    species boundary using sequence similarity. Critical for novel
+    phage lineages without close ICTV representatives.
+    Without lenient taxonomy, ~40%% of environmental viral sequences
+    receive no family-level classification.
+    Camargo et al. 2023 (Nat Biotechnol 41:1783).
+
+Rescue tier
+  Borderline contigs (rescue_min_score ≤ score < min_score) are retained
+  if their length exceeds rescue_min_length_bp. Rationale:
+    - Novel lineages without close geNomad DB references score 0.4-0.6
+      regardless of true viral origin.
+    - Length ≥ 3,000 bp significantly reduces false-positive rate at
+      borderline scores (Roux et al. 2019 MIUViG, Nat Biotechnol 37:505).
+    - Microviridae (~3-6 kb) and Inoviridae (~6-9 kb) complete genomes
+      fall in this size range and may score below 0.7 due to divergence.
+
+Provirus detection
+  disable_find_proviruses: true by default. Provirus detection on
+  post-host-removal contigs produces primarily false positives from
+  residual bacterial sequences. Enable only when specifically targeting
+  lysogenic phage characterisation from metagenomic data.
+
+Prodigal genetic code
+  geNomad predicts the genetic code per contig. CrAss-like phages use
+  genetic code 15 (TGA=Trp instead of Stop). This is propagated to
+  metadata_tsv and used by Pharokka (--genetic_code 15) in annotate.py.
+  Yutin et al. 2018 (Nat Microbiol 3:1145) — CrAss-like phages.
+"""
 
 from __future__ import annotations
 import csv
