@@ -805,8 +805,8 @@ def cmd_download_databases(output_dir, checkv, genomad, pharokka, phold, kraken2
         db_dir = out / "k2_db"
         db_dir.mkdir(parents=True, exist_ok=True)
         # Latest standard-16GB from AWS
-        k2_url = "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_16gb_20241228.tar.gz"
-        k2_tar = db_dir / "k2_standard_16gb.tar.gz"
+        k2_url = "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_16_GB_20260226.tar.gz"
+        k2_tar = db_dir / "k2_standard_16_GB_20260226.tar.gz"
         log_info(f"  Downloading from {k2_url}")
         log_info("  This may take 20-40 minutes depending on connection speed...")
 
