@@ -45,6 +45,7 @@ Coverage estimates use genome size reference ranges:
   (Al-Shayeb et al. 2020, Nature 578:425)
 """
 from __future__ import annotations
+import gzip
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -73,6 +74,91 @@ _MIN_READS          = 100_000
 _REF_GENOME_SMALL   =   5_000   # Microviridae / Inoviridae
 _REF_GENOME_TYPICAL =  50_000   # typical tailed phage
 _REF_GENOME_LARGE   = 200_000   # jumbo phage (conservative)
+
+def _detect_read_length(r1: Path, n_reads: int = 1000) -> int:
+    """Auto-detect read length from first n_reads of R1 FASTQ.
+
+    Samples the first n_reads sequences and returns the median read length.
+    Used to adjust QC and assembly parameters for PE150/PE250/PE300.
+
+    Samples 1000 reads by default — sufficient for stable median estimate
+    while keeping I/O minimal (Schirmer et al. 2015, Nucleic Acids Res 43:e83).
+
+    Returns
+    -------
+    int : detected read length bucket (150, 250, or 300)
+          bucketed to nearest standard Illumina PE length.
+    """
+    lengths: list[int] = []
+    try:
+        opener = gzip.open if str(r1).endswith(".gz") else open
+        with opener(r1, "rt", errors="replace") as f:
+            i = 0
+            for line in f:
+                if i % 4 == 1:  # FASTQ sequence line
+                    lengths.append(len(line.rstrip()))
+                    if len(lengths) >= n_reads:
+                        break
+                i += 1
+    except Exception:
+        return 150  # safe default
+
+    if not lengths:
+        return 150
+
+    median = sorted(lengths)[len(lengths) // 2]
+
+    # Bucket to nearest standard Illumina PE length
+    if median >= 275:
+        return 300
+    elif median >= 200:
+        return 250
+    else:
+        return 150
+
+
+def _read_length_params(read_length: int) -> dict:
+    """Return QC parameter overrides for a given read length.
+
+    PE150 (default): standard Illumina short-read parameters.
+    PE250: MiSeq v2/v3 — longer reads, more overlap, larger windows.
+    PE300: MiSeq v3 600-cycle — maximum read length, extensive overlap.
+
+    Parameter rationale
+    -------------------
+    length_required:
+        Minimum post-trim read length. Set to ~1/3 of read length to
+        retain reads that are still long enough for reliable k-mer
+        assembly. Too short → spurious k-mer matches; too long → discards
+        valid trimmed reads from low-quality 3' ends.
+        Holtgrewe et al. 2013 (PLoS ONE 8:e61458).
+
+    overlap_len_require:
+        PE250/PE300 produce genuine read overlaps of 50-150 bp in
+        amplicon-like preparations. Requiring longer overlaps for
+        correction reduces false corrections from chance overlaps.
+        fastp documentation; Chen et al. 2018 (Bioinformatics 34:i884).
+
+    cut_right_window_size:
+        Sliding window for 3' quality trimming. Larger windows smooth
+        out local quality dips in longer reads, avoiding over-trimming.
+        Bolger et al. 2014 (Bioinformatics 30:2114) — Trimmomatic.
+    """
+    if read_length >= 275:  # PE300
+        return {
+            "length_required":   100,
+            "overlap_len_require": 50,
+            "cut_right_window_size": 8,
+        }
+    elif read_length >= 200:  # PE250
+        return {
+            "length_required":   75,
+            "overlap_len_require": 30,
+            "cut_right_window_size": 6,
+        }
+    else:  # PE150 — use config defaults unchanged
+        return {}
+
 
 def run(
     cfg:       Config,
@@ -109,6 +195,19 @@ def run(
     require_tools(*TOOLS)
     active_warnings: list[str] = []
 
+    # Auto-detect read length and adjust parameters accordingly
+    detected_rl = _detect_read_length(r1)
+    rl_overrides = _read_length_params(detected_rl)
+    if rl_overrides:
+        log_info(
+            f"  Read length : {detected_rl} bp detected (PE{detected_rl}) — "
+            f"adjusting: length_required={rl_overrides['length_required']} "
+            f"overlap={rl_overrides['overlap_len_require']} "
+            f"window={rl_overrides['cut_right_window_size']}"
+        )
+    else:
+        log_info(f"  Read length : {detected_rl} bp detected (PE150) — using default parameters")
+
     with Progress(
         SpinnerColumn(spinner_name="dots2"),
         TextColumn("[bold cyan]{task.description:<60}"),
@@ -121,7 +220,7 @@ def run(
         task = progress.add_task("Initializing...", total=3)
 
         progress.update(task, description="[1/3] fastp   — trimming + quality filter")
-        _run_fastp(sample_id, r1, r2, r1_out, r2_out, json_f, html_f, log_f, cfg)
+        _run_fastp(sample_id, r1, r2, r1_out, r2_out, json_f, html_f, log_f, cfg, rl_overrides)
         progress.advance(task)
         log_ok("  [1/3] fastp   — complete")
 
@@ -148,21 +247,26 @@ def _run_fastp(
     r1_out: Path, r2_out: Path,
     json_f: Path, html_f: Path,
     log_f:  Path, cfg,
+    rl_overrides: dict | None = None,
 ) -> None:
     q = cfg.qc
+    # Apply read-length-specific overrides (PE250/PE300 adjustments)
+    length_required      = (rl_overrides or {}).get("length_required",      q.length_required)
+    overlap_len_require  = (rl_overrides or {}).get("overlap_len_require",   q.overlap_len_require)
+    cut_right_window_size = (rl_overrides or {}).get("cut_right_window_size", q.cut_right_window_size)
     cmd = [
         "fastp",
         "--in1",  str(r1),     "--in2",  str(r2),
         "--out1", str(r1_out), "--out2", str(r2_out),
         "--detect_adapter_for_pe",
         "--cut_right",
-        "--cut_right_window_size",      str(q.cut_right_window_size),
+        "--cut_right_window_size",      str(cut_right_window_size),
         "--cut_right_mean_quality",     str(q.cut_right_mean_quality),
         "--qualified_quality_phred",    str(q.qualified_quality_phred),
         "--unqualified_percent_limit",  str(q.unqualified_percent_limit),
         "--average_qual",               str(q.average_qual),
         "--n_base_limit",               str(q.n_base_limit),
-        "--length_required",            str(q.length_required),
+        "--length_required",            str(length_required),
         "--thread",                     str(cfg.threads),
         "--json",                       str(json_f),
         "--html",                       str(html_f),
@@ -171,7 +275,7 @@ def _run_fastp(
     if q.correction:
         cmd += [
             "--correction",
-            "--overlap_len_require",        str(q.overlap_len_require),
+            "--overlap_len_require",        str(overlap_len_require),
             "--overlap_diff_percent_limit", str(q.overlap_diff_percent_limit),
         ]
     if q.low_complexity_filter:

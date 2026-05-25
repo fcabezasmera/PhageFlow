@@ -60,6 +60,7 @@ k-mer range: 21,33,55,77,99,127
   contiguity in high-coverage regions.
 """
 from __future__ import annotations
+import gzip
 import shutil
 import subprocess
 from pathlib import Path
@@ -87,6 +88,71 @@ _N50_WARN        =  5_000
 # Jumbo phages can reach 540 kb (Al-Shayeb et al. 2020, Nature 578:425).
 # Warn above 750 kb as a conservative upper bound.
 _MAX_CONTIG_WARN = 750_000
+
+def _detect_read_length(r1: Path, n_reads: int = 1000) -> int:
+    """Auto-detect read length from R1 FASTQ (same logic as qc.py).
+
+    Returns bucketed read length: 150, 250, or 300.
+    Used to select optimal k-mer range for MEGAHIT.
+    MEGAHIT supports k>127 (unlike SPAdes v4.x max k=127).
+    """
+    lengths: list[int] = []
+    try:
+        opener = gzip.open if str(r1).endswith(".gz") else open
+        with opener(r1, "rt", errors="replace") as f:
+            i = 0
+            for line in f:
+                if i % 4 == 1:
+                    lengths.append(len(line.rstrip()))
+                    if len(lengths) >= n_reads:
+                        break
+                i += 1
+    except Exception:
+        return 150
+    if not lengths:
+        return 150
+    median = sorted(lengths)[len(lengths) // 2]
+    if median >= 275:
+        return 300
+    elif median >= 200:
+        return 250
+    return 150
+
+
+def _kmers_for_read_length(read_length: int, config_kmers: str) -> tuple[str, str]:
+    """Return optimal k-mer lists for SPAdes and MEGAHIT given read length.
+
+    SPAdes v4.x: hard maximum k=127. All k must be odd and < read_length.
+    MEGAHIT    : supports k up to 255. Odd k only.
+
+    k-mer selection rationale
+    -------------------------
+    Maximum k should be slightly below read length to ensure each k-mer
+    is covered by at least one read. Rule of thumb: k_max < read_length.
+    Bankevich et al. 2012 (J Comput Biol 19:455) — SPAdes.
+    Li et al. 2015 (Bioinformatics 31:1674) — MEGAHIT.
+
+    PE150: k_max=127 (SPAdes limit; <150 bp)
+    PE250: k_max=127 (SPAdes); k_max=241 (MEGAHIT, <250 bp, odd)
+    PE300: k_max=127 (SPAdes); k_max=281 (MEGAHIT, <300 bp, odd)
+    """
+    # SPAdes: always capped at 127 (hard limit in SPAdes v4.x)
+    base = [int(k) for k in config_kmers.split(",") if k.strip().isdigit()]
+    spades_kmers = ",".join(str(k) for k in base if k <= 127)
+
+    # MEGAHIT: extend to higher k for longer reads
+    if read_length >= 275:   # PE300
+        megahit_extra = [141, 161, 181, 201, 221, 241, 261, 281]
+    elif read_length >= 200:  # PE250
+        megahit_extra = [141, 161, 181, 201, 221, 241]
+    else:                     # PE150
+        megahit_extra = []
+
+    megahit_all = sorted(set(base) | set(k for k in megahit_extra if k < read_length))
+    megahit_kmers = ",".join(str(k) for k in megahit_all if k % 2 == 1)
+
+    return spades_kmers, megahit_kmers
+
 
 def run(
     cfg:       Config,
@@ -137,6 +203,17 @@ def run(
     require_tools(*TOOLS)
     active_warnings: list[str] = []
 
+    # Auto-detect read length and select optimal k-mer ranges
+    detected_rl = _detect_read_length(r1)
+    spades_kmers, megahit_kmers = _kmers_for_read_length(detected_rl, cfg.assembly.kmers)
+    if detected_rl > 150:
+        log_info(
+            f"  Read length : {detected_rl} bp (PE{detected_rl}) — "
+            f"MEGAHIT k-mer range extended to {megahit_kmers.split(',')[-1]}"
+        )
+    else:
+        log_info(f"  Read length : {detected_rl} bp (PE150) — standard k-mer range")
+
     with Progress(
         SpinnerColumn(spinner_name="dots2"),
         TextColumn("[bold cyan]{task.description:<60}"),
@@ -152,6 +229,7 @@ def run(
         spades_ok = _run_spades(
             r1, r2, s1 if use_s1 else None,
             spades_dir, log_f, cfg.threads, cfg.memory_gb, force,
+            kmers=spades_kmers,
         )
         if not spades_ok:
             msg = "SPAdes failed — assembly will use MEGAHIT output only."
@@ -161,7 +239,7 @@ def run(
         progress.update(task, description="[2/4] MEGAHIT — no-mercy high-coverage mode")
         megahit_ok = _run_megahit(
             r1, r2, megahit_dir, sample_id,
-            cfg.assembly.kmers, log_f, cfg.threads, force,
+            megahit_kmers, log_f, cfg.threads, force,
         )
         if not megahit_ok:
             if not spades_ok:
@@ -205,6 +283,7 @@ def _run_spades(
     r1: Path, r2: Path, s1: Optional[Path],
     out_dir: Path, log_f: Path,
     threads: int, memory_gb: int, force: bool,
+    kmers: str = "21,33,55,77,99,127",
 ) -> bool:
     contigs_fa = out_dir / "contigs.fasta"
     if contigs_fa.exists() and contigs_fa.stat().st_size > 0 and not force:
@@ -220,7 +299,7 @@ def _run_spades(
         "spades.py",
         "--pe1-1", str(r1),
         "--pe1-2", str(r2),
-        "-k", "21,33,55,77,99,127",
+        "-k", kmers,
         "--phred-offset", "33",
         # Standard mode (no --isolate): works for both pure and mixed samples.
         # --isolate discards low-coverage contigs from multi-genome samples.
