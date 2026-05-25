@@ -423,7 +423,29 @@ def _run_phold(cfg, candidate_id, input_gbk, phold_dir, gbk_out, rpt_dir, force)
         run_silent(cmd, log_file=rpt_dir / f"{candidate_id}_phold.log")
         log_ok("  [Phold] OK")
     except Exception as e:
-        log_warn(f"  [Phold] warning: {e}")
+        # Phold exits 1 when Foldseek finds no structural hits (very small/divergent genomes).
+        # Fall back to Pharokka GBK as the canonical output.
+        phold_log = rpt_dir / f"{candidate_id}_phold.log"
+        no_hits = False
+        if phold_log.exists():
+            try:
+                log_text = phold_log.read_text(errors="replace")
+                no_hits = "no hits whatsoever" in log_text or "no CDS" in log_text.lower()
+            except Exception:
+                pass
+        if no_hits:
+            log_warn(
+                f"  [Phold] no structural hits — genome may be too small or highly divergent. "
+                "Using Pharokka GBK as canonical output."
+            )
+            # Copy Pharokka GBK to Phold location so downstream code finds it
+            import shutil as _sh
+            pharokka_gbk = input_gbk
+            if pharokka_gbk.exists() and not gbk_out.exists():
+                gbk_out.parent.mkdir(parents=True, exist_ok=True)
+                _sh.copy2(pharokka_gbk, gbk_out)
+        else:
+            log_warn(f"  [Phold] warning: {e}")
 
 def _run_plots(
     candidate_id: str,
