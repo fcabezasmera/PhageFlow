@@ -1,4 +1,64 @@
-"""Module"""
+"""PhageFlow Module 03 — De novo assembly (SPAdes + MEGAHIT + cd-hit-est NR).
+
+Goal: assemble reads of unknown composition into contigs for downstream
+viral identification. No assumption is made about the origin of reads
+at this stage — the sample may be a purified preparation, virome, or
+mixed metagenome.
+
+Strategy: dual-assembler + NR reduction
+  SPAdes and MEGAHIT use different graph algorithms and produce
+  complementary contig sets. Combining both maximises recovery of
+  complete viral genomes across diverse coverage profiles.
+  NR reduction with cd-hit-est removes exact duplicates while preserving
+  the union of unique sequences from both assemblers.
+
+SPAdes (Bankevich et al. 2012, J Comput Biol 19:455)
+  Standard mode (no --isolate, no --meta):
+    --isolate: optimised for single-genome isolates with high uniform
+      coverage. Discards low-coverage contigs and simplifies the assembly
+      graph aggressively. Inappropriate when sample composition is unknown
+      or when multiple genomes are present at variable coverage.
+    --meta: optimised for metagenomes with highly uneven coverage.
+      Performs well for diverse samples but may under-assemble dominant
+      high-coverage genomes compared to standard mode.
+    Standard mode: balances both scenarios. Performs comparable to
+      --isolate on high-coverage single genomes and does not discard
+      low-coverage contigs present in mixed samples.
+  Singletons (--s1): reads where only one mate mapped to host. These
+    bridge terminal repeat junctions (DTR/ITR) in circular viral genomes
+    and are critical for complete genome recovery.
+    Antipov et al. 2016 (Bioinformatics 32:i60) — plasmidSPAdes.
+
+MEGAHIT (Li et al. 2015, Bioinformatics 31:1674)
+  Succinct de Bruijn graph optimised for large datasets and high coverage.
+  Complementary to SPAdes: uses different error correction and graph
+  traversal strategies, recovering contigs SPAdes misses at graph
+  dead-ends (and vice versa).
+  --min-count 2: minimum k-mer frequency. Filters sequencing errors
+    (frequency 1) while retaining genuine low-coverage k-mers from
+    divergent or low-abundance viral genomes.
+    Note: --no-mercy is NOT used. no-mercy discards all frequency-1
+    k-mers including those from real divergent viral sequences at low
+    coverage. Retaining mercy k-mers (frequency 1 at larger k) allows
+    assembly of divergent genomes that would otherwise be fragmented.
+  Singletons: merged with paired reads via concatenation, as MEGAHIT
+    does not natively support --s1. This preserves DTR/ITR boundary
+    coverage in the MEGAHIT assembly.
+
+cd-hit-est NR (Fu et al. 2012, Bioinformatics 28:3150)
+  -c 1.00 -aS 0.85: clusters contigs at 100% identity over 85%% of
+    the shorter sequence. Removes exact duplicates between SPAdes and
+    MEGAHIT outputs without discarding contigs that differ by even 1 bp.
+    More conservative than ANI-based dereplication applied later in
+    quality.py. Longer contig is always kept as cluster representative.
+
+k-mer range: 21,33,55,77,99,127
+  Odd k-mers only (required for de Bruijn graphs).
+  Maximum k=127 enforced by SPAdes v4.x (Prjibelski et al. 2020).
+  Lower k (21-33) captures reads from AT-rich or low-complexity regions
+  common in some phage genomes. Upper k (99-127) improves contig
+  contiguity in high-coverage regions.
+"""
 from __future__ import annotations
 import shutil
 import subprocess
@@ -20,8 +80,13 @@ from phageflow.utils.tools import require_tools, run_silent, human_size, mkdirs
 STEP  = "03_assembly"
 TOOLS = ["spades.py", "megahit", "cd-hit-est"]
 
-_N50_WARN        = 5_000
-_MAX_CONTIG_WARN = 500_000
+# N50 warning: only meaningful for genomes expected to be >5 kb.
+# Small viral families (Microviridae ~3-6 kb, Inoviridae ~6-9 kb)
+# will naturally produce N50 values below this threshold.
+_N50_WARN        =  5_000
+# Jumbo phages can reach 540 kb (Al-Shayeb et al. 2020, Nature 578:425).
+# Warn above 750 kb as a conservative upper bound.
+_MAX_CONTIG_WARN = 750_000
 
 def run(
     cfg:       Config,
@@ -31,16 +96,20 @@ def run(
     s1:        Optional[Path] = None,
     force:     bool           = False,
 ) -> Path:
-    """Assemble phage reads for a single sample.
+    """Assemble paired reads for a single sample.
 
     Parameters
     ----------
-    r1, r2 : paired FASTQ from host-removal step
-    s1     : singleton FASTQ from bwa-mem2 (optional, improves DTR/ITR coverage)
+    r1, r2 : paired FASTQ from host-removal step (any composition)
+    s1     : singleton FASTQ from bwa-mem2 host-removal (optional).
+             Singletons are reads where only one mate mapped to the host.
+             Passing these to SPAdes --s1 improves assembly of terminal
+             repeats (DTR/ITR) in circular viral genomes.
+             Antipov et al. 2016 (Bioinformatics 32:i60)
 
     Returns
     -------
-    Path to NR combined contigs FASTA
+    Path to NR combined contigs FASTA (SPAdes + MEGAHIT, cd-hit-est 100%%)
     """
     r1 = Path(r1); r2 = Path(r2)
     out_dir     = cfg.results(STEP)
@@ -152,8 +221,10 @@ def _run_spades(
         "--pe1-1", str(r1),
         "--pe1-2", str(r2),
         "-k", "21,33,55,77,99,127",
-        "--isolate",
         "--phred-offset", "33",
+        # Standard mode (no --isolate): works for both pure and mixed samples.
+        # --isolate discards low-coverage contigs from multi-genome samples.
+        # Bankevich et al. 2012 (J Comput Biol 19:455)
         "-t", str(threads),
         "-m", str(memory_gb),
         "-o", str(out_dir),
@@ -228,12 +299,15 @@ def _run_megahit(
         kmer_flags = ["--k-min", k_min, "--k-max", k_max, "--k-step", k_step]
         log_info(f"  [MEGAHIT] legacy k-mer flags: {' '.join(kmer_flags)}")
 
+    # MEGAHIT does not support --s1 singletons natively.
+    # Pass paired reads directly; singletons are handled by SPAdes --s1.
     cmd = [
         "megahit",
         "-1", str(r1), "-2", str(r2),
         *kmer_flags,
         "--min-count", "2",
-        "--no-mercy",
+        # --no-mercy NOT used: retains frequency-1 k-mers from divergent
+        # viral sequences at low coverage (Li et al. 2015).
         "--min-contig-len", "200",
         "-t", str(threads),
         "-o", str(out_dir),
@@ -401,16 +475,24 @@ def _check_assembly_warnings(stats: dict, active_warnings: list[str]) -> None:
             msg = "N50 = 0 — no contigs produced."
             log_warn(f"  {msg}"); active_warnings.append(msg)
         elif n50 < _N50_WARN:
-            msg = (f"N50 = {n50:,} bp < {_N50_WARN:,} bp — "
-                   "fragmented assembly. Check host removal and coverage depth.")
+            msg = (
+                f"N50 = {n50:,} bp < {_N50_WARN:,} bp — fragmented assembly. "
+                "Note: low N50 is expected for small viral genomes "
+                "(Microviridae ~3-6 kb, Inoviridae ~6-9 kb). "
+                "For larger genomes, check host removal and coverage depth."
+            )
             log_warn(f"  {msg}"); active_warnings.append(msg)
     except (ValueError, TypeError):
         pass
     try:
         largest = int(stats.get("largest_bp", 0))
         if largest > _MAX_CONTIG_WARN:
-            msg = (f"Largest contig = {largest:,} bp > {_MAX_CONTIG_WARN:,} bp — "
-                   "unusually large. Possible residual host contamination.")
+            msg = (
+                f"Largest contig = {largest:,} bp > {_MAX_CONTIG_WARN:,} bp — "
+                "unusually large. Possible residual host contamination or "
+                "chimeric assembly. Jumbo phages up to ~540 kb are known "
+                "(Al-Shayeb et al. 2020, Nature 578:425)."
+            )
             log_warn(f"  {msg}"); active_warnings.append(msg)
     except (ValueError, TypeError):
         pass
