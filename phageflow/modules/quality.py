@@ -241,12 +241,14 @@ def run(
 
         contigs     = _assign_tiers(checkv_rows, metadata, cfg)
         _warn_special_cases(contigs, active_warnings, cfg)
-        _warn_naming_level_redundancy(contigs, active_warnings)
         progress.advance(task)
 
         # ── Step 3: Dereplication ─────────────────────────────────────────────
         progress.update(task, description="[3/6] Dereplicating annotation_ready candidates")
         contigs = _dereplicate(contigs, seqs, cfg.threads, active_warnings)
+        # Warn about redundancy AFTER dereplication to avoid false positives
+        # from circular rotations that dereplication already resolved.
+        _warn_naming_level_redundancy(contigs, active_warnings)
         progress.advance(task)
 
         # ── Step 4: Co-bin LQ drafts by taxon ─────────────────────────────────
@@ -551,7 +553,16 @@ def _dereplicate(
     if len(large) >= 2:
         has_blast = bool(shutil.which("blastn") and shutil.which("makeblastdb"))
         if has_blast:
-            clusters += _cluster_blastn(large, seqs, threads)
+            # First pass: standard single-hit coverage threshold
+            clusters_std = _cluster_blastn(large, seqs, threads)
+            # Second pass: circular rotation detection (multi-hit combined coverage)
+            # Catches DTR genomes assembled with different start positions
+            remaining = [
+                s for s in large
+                if not any(s in c and len(c) > 1 for c in clusters_std)
+            ]
+            clusters_circ = _cluster_blastn_circular(remaining, seqs, threads) if len(remaining) >= 2 else []
+            clusters += clusters_std + [c for c in clusters_circ if len(c) > 1]
         elif has_mash:
             log_warn("  [derep] blastn not found — falling back to mash for large genomes.")
             active_warnings.append("blastn not found; used mash for large-genome dereplication (less sensitive)")
@@ -739,6 +750,108 @@ def _cluster_blastn(singles: list, seqs: dict, threads: int) -> list[list]:
 
                     if pident >= _BLAST_ANI_THRESH and coverage >= _BLAST_COV_THRESH:
                         uf.union(qseqid, sseqid)
+
+        return uf.groups()
+
+
+def _cluster_blastn_circular(singles: list, seqs: dict, threads: int) -> list[list]:
+    """Detect circular genome rotations missed by single-hit coverage threshold.
+
+    Circular genomes assembled with different start positions produce two
+    BLAST hits that together cover the full sequence, but neither hit alone
+    meets the 80% coverage threshold. Example:
+
+      genome A (rotated): |---X---|---Y---|   157 kb
+      genome B (rotated): |---Y---|---X---|   157 kb
+
+      Hit 1: Y vs Y → 100% identity, 65% of A coverage
+      Hit 2: X vs X → 100% identity, 35% of A coverage
+      Combined      → 100% coverage → same genome, different rotation
+
+    Detection criterion:
+      sum of all aligned bases between pair / min(len_A, len_B) >= 0.90
+      AND max single-hit pident >= 95%
+
+    This is applied AFTER _cluster_blastn to catch cases it misses.
+    Only applies to Complete/DTR candidates (circular topology).
+
+    Antipov et al. 2016 (Bioinformatics 32:i60) — circular genome assembly.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        fasta = tmp / "candidates.fasta"
+        with open(fasta, "w") as f:
+            for seq in singles:
+                if seq in seqs:
+                    f.write(f">{seq}\n{seqs[seq]}\n")
+
+        db = tmp / "blastdb"
+        try:
+            subprocess.run(
+                ["makeblastdb", "-in", str(fasta), "-dbtype", "nucl",
+                 "-out", str(db), "-parse_seqids"],
+                capture_output=True, check=True, timeout=60,
+            )
+        except Exception:
+            return [[s] for s in singles]
+
+        blast_out = tmp / "blast.tsv"
+        try:
+            subprocess.run(
+                ["blastn", "-query", str(fasta), "-db", str(db),
+                 "-outfmt", "6 qseqid sseqid pident length qlen slen qstart qend",
+                 "-evalue", "1e-10",
+                 "-num_threads", str(min(threads, 8)),
+                 "-out", str(blast_out)],
+                capture_output=True, check=True, timeout=600,
+            )
+        except Exception:
+            return [[s] for s in singles]
+
+        # Accumulate total aligned bases per pair
+        from collections import defaultdict
+        pair_hits: dict[tuple, dict] = defaultdict(lambda: {
+            "total_aligned": 0, "max_pident": 0.0, "qlen": 0, "slen": 0
+        })
+
+        if blast_out.exists():
+            with open(blast_out) as f:
+                for line in f:
+                    parts = line.strip().split("\t")
+                    if len(parts) < 8:
+                        continue
+                    try:
+                        qseqid = parts[0]; sseqid = parts[1]
+                        pident = float(parts[2]); aln_len = int(parts[3])
+                        qlen = int(parts[4]); slen = int(parts[5])
+                    except (ValueError, IndexError):
+                        continue
+                    if qseqid == sseqid:
+                        continue
+                    if qseqid not in singles or sseqid not in singles:
+                        continue
+                    # Canonical pair key (sorted to merge A→B and B→A)
+                    pair = tuple(sorted([qseqid, sseqid]))
+                    pair_hits[pair]["total_aligned"] += aln_len
+                    pair_hits[pair]["max_pident"] = max(
+                        pair_hits[pair]["max_pident"], pident
+                    )
+                    pair_hits[pair]["qlen"] = qlen
+                    pair_hits[pair]["slen"] = slen
+
+        uf = _UnionFind(singles)
+        for (seq_a, seq_b), hits in pair_hits.items():
+            min_len = min(hits["qlen"], hits["slen"])
+            if min_len == 0:
+                continue
+            combined_cov = hits["total_aligned"] / min_len
+            if hits["max_pident"] >= 95.0 and combined_cov >= 0.90:
+                log_info(
+                    f"  [derep-circular] {seq_a} ↔ {seq_b}: "
+                    f"combined coverage={combined_cov*100:.1f}% "
+                    f"pident={hits['max_pident']:.1f}% — circular rotation detected"
+                )
+                uf.union(seq_a, seq_b)
 
         return uf.groups()
 
