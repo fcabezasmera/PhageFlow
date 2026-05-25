@@ -3,39 +3,58 @@ channels:
   - conda-forge
   - bioconda
   - defaults
+
 dependencies:
-  - numpy
-  - mash
-  - biopython
+  # ── Python ────────────────────────────────────────────────────────────────
   - python=3.11
-  - mummer4
-  - pharokka
-  - diamond
-  - iqtree
-  - bwa-mem2
-  - seqtk
-  - trimal
   - pip
-  - pandas
+  - click >=8.1
+  - rich >=13.0
+  - pyyaml >=6.0
+  - biopython >=1.80
+  - pandas >=2.0
+  - numpy >=1.24
   - matplotlib
-  - fastqc
   - tqdm
-  - cd-hit
-  - mafft
-  - kraken2
-  - checkv
-  - samtools[version='>=1.15']
-  - spades
-  - pyyaml
-  - hmmer
-  - multiqc
+
+  # ── Module 01 — QC ────────────────────────────────────────────────────────
   - fastp
-  - megahit
-  - seqkit
+  - fastqc
+  - multiqc
+
+  # ── Module 02 — Host removal ──────────────────────────────────────────────
+  - bwa-mem2
+  - samtools >=1.15
+  - seqtk
+  - kraken2
   - ncbi-datasets-cli
+
+  # ── Module 03 — Assembly ──────────────────────────────────────────────────
+  - spades
+  - megahit
+  - cd-hit
+  - seqkit
+
+  # ── Module 04 — Viral ID ──────────────────────────────────────────────────
   - genomad
-  - phold
-  - pytorch[build=cuda*]
-  - phynteny_transformer
+
+  # ── Module 05 — Quality ───────────────────────────────────────────────────
+  - checkv
+  - mash
   - minimap2
-prefix: /home/labinfo/miniconda3/envs/phageflow
+
+  # ── Module 06 — Annotation ────────────────────────────────────────────────
+  - pharokka
+  - phold
+  - phynteny_transformer
+  - dnaapler
+  - pytorch
+
+  # ── Utilities ─────────────────────────────────────────────────────────────
+  - pigz
+  - mummer4
+  - diamond
+  - hmmer
+  - mafft
+  - trimal
+  - iqtree

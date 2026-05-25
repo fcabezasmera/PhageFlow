@@ -41,7 +41,7 @@ TOOLS = ["fastp", "fastqc", "multiqc"]
 
 # ── Warning thresholds (evaluation only — NOT fastp filter parameters) ───────
 _PASS_GOOD = 85.0          # pass rate expected with strict HQ filters
-_PASS_WARN = 70.0
+_PASS_WARN = 75.0
 _Q20_GOOD  = 95.0
 _Q20_WARN  = 90.0
 _Q30_GOOD  = 80.0          # Q30 ≥80% is excellent for purified phage
@@ -81,12 +81,7 @@ def run(
     log_f  = rpt_dir / f"{sample_id}_qc.log"
 
     log_step(f"Module 01 — QC  [{sample_id}]")
-    log_info(f"  R1 : {r1}  ({human_size(r1)})")
-    log_info(f"  R2 : {r2}  ({human_size(r2)})")
-    log_info(
-        "  fastp : Q≥25 · mean-Q≥22 · PE-correct(5%) · len≥80 · "
-        "complexity≥20% · poly-X≥10  (NO dedup)"
-    )
+    log_info(f"  {sample_id}  ·  R1: {human_size(r1)}  ·  R2: {human_size(r2)}")
 
     if r1_out.exists() and r1_out.stat().st_size > 0 and not force:
         log_info("  Already processed — skipping  (--force to re-run)")
@@ -106,15 +101,15 @@ def run(
     ) as progress:
         task = progress.add_task("Initializing...", total=3)
 
-        progress.update(task, description="[1/3] fastp   — Q25 · mean-Q22 · PE-correct(5%)")
+        progress.update(task, description="[1/3] fastp   — trimming + quality filter")
         _run_fastp(sample_id, r1, r2, r1_out, r2_out, json_f, html_f, log_f, cfg)
         progress.advance(task)
 
-        progress.update(task, description="[2/3] FastQC  — per-read metrics (R1 + R2)")
+        progress.update(task, description="[2/3] FastQC  — per-read QC")
         _run_fastqc(r1_out, r2_out, rpt_dir, log_f)
         progress.advance(task)
 
-        progress.update(task, description="[3/3] MultiQC — aggregating reports")
+        progress.update(task, description="[3/3] MultiQC — aggregate report")
         _run_multiqc(rpt_dir, sample_id)
         progress.advance(task)
 
@@ -169,7 +164,6 @@ def _run_fastp(
         cmd += ["--trim_poly_x",
                 "--poly_x_min_len",             str(q.poly_x_min_len)]
     run_silent(cmd, log_file=log_f)
-    log_ok("  [fastp] complete")
 
 
 # ── FastQC + MultiQC ─────────────────────────────────────────────────────────

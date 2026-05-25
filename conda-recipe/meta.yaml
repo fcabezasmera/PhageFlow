@@ -1,0 +1,81 @@
+{% set name = "phageflow" %}
+{% set version = "0.1.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  url: https://github.com/fcabezasmera/PhageFlow/archive/v{{ version }}.tar.gz
+  # sha256: fill after creating GitHub release tag
+
+build:
+  number: 0
+  noarch: python
+  script: {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
+  entry_points:
+    - phageflow = phageflow.cli:cli
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+    - setuptools >=61
+  run:
+    # ── Python runtime ────────────────────────────────────────────────────────
+    - python >=3.10
+    - click >=8.1
+    - rich >=13.0
+    - pyyaml >=6.0
+    - biopython >=1.80
+    - pandas >=2.0
+    - numpy >=1.24
+    - matplotlib-base
+    - tqdm
+    # ── Module 01 — QC ────────────────────────────────────────────────────────
+    - fastp >=1.0
+    - fastqc
+    - multiqc
+    # ── Module 02 — Host removal ──────────────────────────────────────────────
+    - bwa-mem2
+    - samtools >=1.15
+    - seqtk
+    - ncbi-datasets-cli
+    - kraken2                  # optional: classification-based host removal
+    # ── Module 03 — Assembly ─────────────────────────────────────────────────
+    - spades >=3.15
+    - megahit >=1.2.9
+    - cd-hit
+    - seqkit
+    # ── Module 04 — Viral ID ─────────────────────────────────────────────────
+    - genomad >=1.8
+    # ── Module 05 — Quality ───────────────────────────────────────────────────
+    - checkv >=1.0
+    - mash
+    - minimap2
+    # ── Module 06 — Annotation ────────────────────────────────────────────────
+    - pharokka >=1.7
+    - phold >=1.0
+    - phynteny_transformer
+    - dnaapler
+    # ── Utilities ─────────────────────────────────────────────────────────────
+    - pigz
+
+test:
+  imports:
+    - phageflow
+  commands:
+    - phageflow --version
+    - phageflow --help
+
+about:
+  home: https://github.com/fcabezasmera/PhageFlow
+  summary: Modular bacteriophage genomics pipeline for complete genome recovery from Illumina sequencing
+  license: MIT
+  license_file: LICENSE
+  doc_url: https://github.com/fcabezasmera/PhageFlow
+  dev_url: https://github.com/fcabezasmera/PhageFlow
+
+extra:
+  recipe-maintainers:
+    - fcabezasmera

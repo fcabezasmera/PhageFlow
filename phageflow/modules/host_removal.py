@@ -68,8 +68,7 @@ def run(
     log_f         = rpt_dir / f"{sample_id}_host_removal.log"
 
     log_step(f"Module 02 — host removal  [{sample_id}]")
-    log_info(f"  R1 : {r1}  ({human_size(r1)})")
-    log_info(f"  R2 : {r2}  ({human_size(r2)})")
+    log_info(f"  {sample_id}  ·  R1: {human_size(r1)}  ·  R2: {human_size(r2)}")
 
     if r1_out.exists() and r1_out.stat().st_size > 0 and not force:
         log_info("  Already processed — skipping  (--force to re-run)")
@@ -82,24 +81,35 @@ def run(
         require_tools(*TOOLS_BWA)
         _check_samtools_version()
         combined = host_dir / "combined_hosts.fasta"
-        log_info("  Mode     : bwa-mem2 streaming  (no BAM intermediate)")
-        log_info("  Pipeline : bwa-mem2 | view | sort -n | fastq  (single pipe)")
-        log_info("  Singletons → DTR/ITR boundary coverage (Nayfach et al. 2021)")
-        if always:
-            log_info(f"  Config always_include: {', '.join(always)}")
+        _host_label = ", ".join(accessions) if accessions else (
+            host_file.name if host_file else "config defaults"
+        )
+        log_info(f"  mode: bwa-mem2  ·  host: {_host_label}")
         n_steps = 3
     else:
         require_tools(*TOOLS_K2)
         db = kraken_db or cfg.databases.kraken2
         if not db or not Path(db).exists():
-            log_error("  Kraken2 DB not found. Provide --host-file/--accessions or set databases.kraken2.")
+            # Passthrough: sin referencia de host ni Kraken2 DB.
+            log_warn("  No host reference or Kraken2 DB → PASSTHROUGH (reads unchanged)")
+            log_warn("  Host removal skipped — all reads treated as phage reads")
+            import shutil as _sh
+            _sh.copy2(str(r1), str(r1_out))
+            _sh.copy2(str(r2), str(r2_out))
+            singleton_out.write_bytes(b"")
+            _n = _count_reads_fastq(r1_out, cfg.threads)
+            _pt_stats = {
+                "reads_in": str(_n * 2), "reads_phage": str(_n * 2),
+                "reads_singleton": "0", "pct_host": "0.00%",
+                "pct_phage": "100.00%", "pct_singleton": "0.00%",
+            }
+            _save_tsv({**_pt_stats, "sample": sample_id, "mode": "passthrough"},
+                      rpt_dir / "host_removal_summary.tsv")
+            log_step(f"Module 02 completed ✓  [{sample_id}]  (passthrough — no host)")
             return r1_out, r2_out, singleton_out
-        log_info("  Mode     : Kraken2  (confidence=0.5 · min-hit-groups=3)")
-        log_info(f"  Keeping  : unclassified + Viruses (taxid {TAXID_VIRUSES})")
-        log_warn(
-            "  LIMITATION: Kraken2 paired mode discards boundary reads at DTR/ITR termini. "
-            "Use bwa-mem2 mode or enable kraken2_postfilter: true in config.yaml."
-        )
+        log_info(f"  mode: Kraken2  ·  db: {Path(str(db)).name}")
+        if cfg.host_removal.kraken2_postfilter:
+            log_info("  Kraken2 postfilter: bwa-mem2 active (recovers DTR/ITR singletons)")
         n_steps = 3 if cfg.host_removal.kraken2_postfilter else 2
 
     stats: dict = {}
@@ -116,7 +126,7 @@ def run(
         task = progress.add_task("Initializing...", total=n_steps)
 
         if use_bwa:
-            progress.update(task, description="[1/3] bwa-mem2 — resolving reference + index")
+            progress.update(task, description="[1/3] bwa-mem2 — reference + index")
             idx = Path(str(combined) + ".bwt.2bit.64")
             if idx.exists() and not force:
                 # Index cached from previous run — skip download and rebuild.
@@ -134,14 +144,14 @@ def run(
                 _cleanup_ncbi_download(host_dir)
             progress.advance(task)
 
-            progress.update(task, description="[2/3] bwa-mem2|sort-n|fastq — streaming pipeline")
+            progress.update(task, description="[2/3] bwa-mem2 — streaming alignment")
             stats = _run_bwa_pipeline(
                 sample_id, r1, r2, combined, r1_out, r2_out, singleton_out,
                 tmp_dir, log_f, cfg.threads,
             )
             progress.advance(task)
 
-            progress.update(task, description="[3/3] Level A  — contamination check (Kraken2)")
+            progress.update(task, description="[3/3] Level A  — contamination check")
             _level_a_check(r1_out, r2_out, rpt_dir, sample_id, cfg, active_warnings)
             progress.advance(task)
 
@@ -344,7 +354,6 @@ def _run_bwa_pipeline(
         f"  -0 /dev/null"
     )
     run_silent(cmd, log_file=log_f, shell=True)
-    log_ok("  [bwa-mem2] streaming alignment + extraction complete")
 
     n_in  = _count_reads_fastq(r1,           threads)
     n_out = _count_reads_fastq(r1_out,        threads)

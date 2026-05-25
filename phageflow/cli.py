@@ -136,11 +136,19 @@ def _load(
         config  = str(p / "config" / "config.yaml")
         workdir = str(p)
     cfg_path = Path(config)
+    _using_bundled = False
     if not cfg_path.exists():
-        log_error(f"Config file not found: {cfg_path}")
-        sys.exit(1)
+        from importlib.resources import files as _res_files
+        _default = Path(str(_res_files("phageflow.config").joinpath("default_config.yaml")))
+        if _default.exists():
+            log_info(f"  Config   : bundled default ('{cfg_path}' not found — OK)")
+            cfg_path = _default
+            _using_bundled = True
+        else:
+            log_error(f"Config file not found: {cfg_path}")
+            sys.exit(1)
 
-    wd  = Path(workdir) if workdir else cfg_path.parent.parent
+    wd  = Path(workdir) if workdir else (Path(".").resolve() if _using_bundled else cfg_path.parent.parent)
     cfg = load_config(cfg_path, workdir=wd)
 
     if output_dir:
