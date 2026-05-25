@@ -688,6 +688,22 @@ def cmd_config(output):
 
 
 # ---------------------------------------------------------------------------
+# resistance
+# ---------------------------------------------------------------------------
+@cli.command("resistance")
+@common_options
+@click.option("--sample-id", default=None,
+              help="Sample identifier.")
+@click.option("--candidate-id", required=True,
+              help="Candidate ID (stem of annotation_ready FASTA, e.g. Caudoviricetes_candidate_001).")
+def cmd_resistance(config, workdir, output_dir, reports_dir, threads, force, project,
+                   sample_id, candidate_id):
+    """AMR, virulence, anti-CRISPR and defense element screening."""
+    cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
+    sid = sample_id or candidate_id
+    from phageflow.modules.resistance import run
+    run(cfg, sample_id=sid, candidate_id=candidate_id, force=force)
+# ---------------------------------------------------------------------------
 # init
 # ---------------------------------------------------------------------------
 
