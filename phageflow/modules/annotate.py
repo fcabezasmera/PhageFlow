@@ -297,6 +297,34 @@ def _parse_genetic_code_from_fasta(genome: Path, default: int = 11) -> int:
     return default
 
 
+# ── GBK feature counter ──────────────────────────────────────────────────────────
+
+def _count_noncds_features_gbk(gbk_path: Path) -> tuple[int, int, int]:
+    """Count tRNA, tmRNA and CRISPR features from GBK file.
+
+    Reads feature type lines (e.g. "     tRNA            ...") directly
+    from the GBK flat file. More reliable than parsing cds_functions.tsv
+    which may have wrong counts in some Pharokka versions.
+
+    Returns (n_trna, n_tmrna, n_crispr)
+    """
+    if not gbk_path or not gbk_path.exists():
+        return 0, 0, 0
+    n_trna = n_tmrna = n_crispr = 0
+    with open(gbk_path, errors="replace") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith("tRNA ") or stripped == "tRNA":
+                # Feature type line: "     tRNA            location"
+                if line.startswith("     tRNA ") or line.startswith("     tRNA	"):
+                    n_trna += 1
+            elif line.startswith("     tmRNA ") or line.startswith("     tmRNA	"):
+                n_tmrna += 1
+            elif line.startswith("     repeat_region") and "CRISPR" in line:
+                n_crispr += 1
+    return n_trna, n_tmrna, n_crispr
+
+
 # ── Step 1: Pharokka ──────────────────────────────────────────────────────────
 
 def _run_pharokka(cfg, candidate_id, genome, pharokka_dir, gbk_out,
@@ -323,6 +351,7 @@ def _run_pharokka(cfg, candidate_id, genome, pharokka_dir, gbk_out,
         "-p",        candidate_id,
         "--threads", str(cfg.threads),
         "--coding_table", str(genetic_code),
+        "--locustag", candidate_id[:8].upper().replace("-", "").replace("_", ""),
         "--force",
     ]
 
@@ -611,17 +640,9 @@ def _parse_pharokka_per_cds(pharokka_dir: Path, candidate_id: str) -> dict:
     hypo = total - annotated
     pct  = f"{annotated / total * 100:.1f}%" if total else "0.0%"
 
-    n_trna = n_tmrna = n_crispr = 0
-    if summary_tsv.exists():
-        with open(summary_tsv, newline="") as f:
-            reader = csv.DictReader(f, delimiter="\t")
-            for row in reader:
-                try:
-                    n_trna   += int(row.get("tRNAs",   0) or 0)
-                    n_tmrna  += int(row.get("tmRNAs",  0) or 0)
-                    n_crispr += int(row.get("CRISPRs", 0) or 0)
-                except (ValueError, TypeError):
-                    pass
+    # Count non-CDS features from GBK (more reliable than cds_functions.tsv)
+    gbk_path = pharokka_dir / f"{candidate_id}.gbk"
+    n_trna, n_tmrna, n_crispr = _count_noncds_features_gbk(gbk_path)
 
     return {
         "total_cds":     total,
