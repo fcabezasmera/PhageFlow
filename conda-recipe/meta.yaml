@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/fcabezasmera/PhageFlow/archive/v{{ version }}.tar.gz
-  # sha256: fill after creating GitHub release tag v0.2.0
+  sha256: 3280241178e31f3ef5707705539ce2dd27f2f13738bf34ce9e97369326efea56
 
 build:
   number: 0
