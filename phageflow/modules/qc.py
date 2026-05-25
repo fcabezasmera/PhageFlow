@@ -1,4 +1,49 @@
-"""Module"""
+"""PhageFlow Module 01 — Read quality control (fastp + FastQC + MultiQC).
+
+Goal: trim adapters, filter low-quality reads, and remove low-complexity
+sequences from paired-end Illumina reads prior to host removal and assembly.
+Inputs are assumed to be raw reads of unknown composition (metagenome,
+virome, or purified preparation). No phage-specific assumptions are made here.
+
+Tool: fastp (Chen et al. 2018, Bioinformatics 34:i884)
+  Adapter trimming  : auto-detect PE adapters (--detect_adapter_for_pe)
+  Quality trimming  : sliding-window 3\'→5\' (--cut_right)
+  PE correction     : overlap-based base correction for paired reads
+  Low-complexity    : homopolymer / dust filter (Roux et al. 2019 MIUViG)
+  Poly-X removal    : poly-G/C/A/T tail trimming (NovaSeq 2-color artefacts)
+
+Parameter rationale
+  average_qual 20       Q20 = 99% per-base accuracy; MIUViG minimum standard
+                        (Roux et al. 2019, Nat Biotechnol 37:505).
+                        Stricter thresholds (Q22+) discard reads from
+                        divergent viral regions without improving assembly.
+  length_required 50    Reads ≥50 bp assemble reliably in SPAdes/MEGAHIT
+                        (Holtgrewe et al. 2013, PLoS ONE 8:e61458).
+                        Retains reads from terminal repeats (DTR/ITR) and
+                        small viral genomes (Microviridae ~3-6 kb,
+                        Inoviridae ~6-9 kb).
+  low_complexity 20%    Removes homopolymers and dust reads that inflate
+                        assembly graphs without contributing sequence
+                        information (Roux et al. 2019 MIUViG §2.1).
+  correction true       PE overlap correction reduces SNP-like errors at
+                        read ends, improving k-mer graph accuracy.
+  trim_poly_x true      NovaSeq and NextSeq (2-color SBS) append poly-G
+                        artefacts to reads shorter than the flow cell cycle
+                        count (Illumina tech note 2017).
+
+Duplication note
+  High duplication (>50%) is expected and normal in purified phage
+  preparations at high coverage. Optical/PCR duplicates are NOT removed
+  here — deduplication would discard real reads in high-coverage samples
+  and is not recommended for viral genome assembly
+  (Head et al. 2014, Biotechniques 56:61).
+
+Coverage estimates use genome size reference ranges:
+  Small (Microviridae/Inoviridae) : ~5 kb
+  Typical tailed phage            : ~50 kb
+  Large (Jumbo phage)             : ~200-540 kb
+  (Al-Shayeb et al. 2020, Nature 578:425)
+"""
 from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,8 +67,12 @@ _Q20_GOOD  = 95.0
 _Q20_WARN  = 90.0
 _Q30_GOOD  = 80.0
 _Q30_WARN  = 70.0
-_MIN_READS     = 100_000
-_REF_GENOME_BP = 50_000
+_MIN_READS          = 100_000
+# Phage genome size references for coverage estimation display
+# Al-Shayeb et al. 2020 (Nature 578:425); Ackermann 2007 (Arch Virol 152:227)
+_REF_GENOME_SMALL   =   5_000   # Microviridae / Inoviridae
+_REF_GENOME_TYPICAL =  50_000   # typical tailed phage
+_REF_GENOME_LARGE   = 200_000   # jumbo phage (conservative)
 
 def run(
     cfg:       Config,
@@ -179,7 +228,8 @@ def _parse_fastp_json(json_f: Path) -> dict:
     empty = {
         "reads_in": "0", "reads_out": "0", "pct_pass": "0.0%",
         "gc_pct":   "N/A", "q20_pct": "N/A", "q30_pct": "N/A",
-        "bp_out":   "0",   "dup_pct": "N/A", "est_coverage": "N/A",
+        "bp_out":   "0",   "dup_pct": "N/A",
+        "est_coverage_small": "N/A", "est_coverage_typical": "N/A", "est_coverage_large": "N/A",
     }
     if not json_f.exists():
         return empty
@@ -192,7 +242,9 @@ def _parse_fastp_json(json_f: Path) -> dict:
         ro  = af["total_reads"]
         bp  = af.get("total_bases", 0)
         pp  = ro / ri * 100 if ri else 0.0
-        cov = bp / _REF_GENOME_BP if bp else 0.0
+        cov_small   = bp / _REF_GENOME_SMALL   if bp else 0.0
+        cov_typical = bp / _REF_GENOME_TYPICAL if bp else 0.0
+        cov_large   = bp / _REF_GENOME_LARGE   if bp else 0.0
         dup = d.get("duplication", {}).get("rate", 0) * 100
         return {
             "reads_in":     f"{ri:,}",
@@ -203,7 +255,9 @@ def _parse_fastp_json(json_f: Path) -> dict:
             "q30_pct":      f"{af.get('q30_rate',   0) * 100:.1f}%",
             "bp_out":       f"{bp:,}",
             "dup_pct":      f"{dup:.1f}%",
-            "est_coverage": f"{cov:.0f}x" if cov else "N/A",
+            "est_coverage_small":   f"{cov_small:.0f}x"   if cov_small   else "N/A",
+            "est_coverage_typical": f"{cov_typical:.0f}x" if cov_typical else "N/A",
+            "est_coverage_large":   f"{cov_large:.0f}x"   if cov_large   else "N/A",
         }
     except Exception:
         return empty
@@ -234,10 +288,11 @@ def _check_warnings(m: dict, active_warnings: list[str]) -> None:
         log_warn(f"  ⚠ {msg}"); active_warnings.append(msg)
 
     dup = _pct("dup_pct")
-    if dup > 70.0:
+    if dup > 50.0:
         log_info(
-            f"  ℹ Duplication {m.get('dup_pct','?')} — normal at high phage "
-            "coverage (Head et al. 2014). NOT deduplicated."
+            f"  ℹ Duplication {m.get('dup_pct','?')} — elevated duplication is "
+            "normal in high-coverage samples and purified viral preparations. "
+            "Reads are NOT deduplicated (Head et al. 2014, Biotechniques 56:61)."
         )
 
     try:
@@ -270,8 +325,10 @@ def _print_completion_panel(
         f"  [cyan]Quality :[/cyan] Q20={_c(m.get('q20_pct','0%'), _Q20_GOOD, _Q20_WARN)}"
         f"  Q30={_c(m.get('q30_pct','0%'), _Q30_GOOD, _Q30_WARN)}"
         f"  GC={m.get('gc_pct','N/A')}  dup={m.get('dup_pct','N/A')}",
-        f"  [cyan]Yield   :[/cyan] {m.get('bp_out','?')} bp  "
-        f"≈{m.get('est_coverage','?')} on 50 kb phage  [dim](÷3 for 150 kb)[/dim]",
+        f"  [cyan]Yield   :[/cyan] {m.get('bp_out','?')} bp",
+        f"  [cyan]Coverage:[/cyan] [dim]~5 kb:[/dim] {m.get('est_coverage_small','?')}"
+        f"  [dim]~50 kb:[/dim] {m.get('est_coverage_typical','?')}"
+        f"  [dim]~200 kb:[/dim] {m.get('est_coverage_large','?')}",
         "",
         "[bold]Output[/bold]",
         f"  R1      : {r1_out}",
