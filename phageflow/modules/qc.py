@@ -208,10 +208,11 @@ def _run_multiqc(rpt_dir: Path, sample_id: str) -> None:
 def _parse_fastp_json(json_f: Path) -> dict:
     """Extract QC metrics + rough coverage estimate from fastp JSON."""
     empty = {
-        "reads_in": "0", "reads_out": "0", "pct_pass": "0.0%",
-        "gc_pct":   "N/A", "q20_pct": "N/A", "q30_pct": "N/A",
-        "bp_out":   "0",   "est_coverage": "N/A", "_reads_out": 0,
-    }
+    "reads_in": "0", "reads_out": "0", "pct_pass": "0.0%",
+    "gc_pct":   "N/A", "q20_pct": "N/A", "q30_pct": "N/A",
+    "bp_out":   "0",   "est_coverage": "N/A",
+    }  
+    
     if not json_f.exists():
         return empty
     try:
@@ -233,7 +234,6 @@ def _parse_fastp_json(json_f: Path) -> dict:
             "q30_pct":      f"{af.get('q30_rate',   0) * 100:.1f}%",
             "bp_out":       f"{bp:,}",
             "est_coverage": f"{cov:.0f}x" if cov else "N/A",
-            "_reads_out":   ro,
         }
     except Exception:
         return empty
@@ -256,13 +256,15 @@ def _check_warnings(m: dict, active_warnings: list[str]) -> None:
     if 0 < q30 < _Q30_WARN:
         msg = f"Q30 rate {m['q30_pct']} < {_Q30_WARN}% — assembly contiguity may suffer"
         log_warn(f"  ⚠ {msg}"); active_warnings.append(msg)
-
-    ro = m.get("_reads_out", 0)
+        
+    try:
+        ro = int(str(m.get("reads_out", "0")).replace(",", ""))
+    except (ValueError, TypeError):
+        ro = 0
     if 0 < ro < _MIN_READS:
         msg = (f"Only {ro:,} reads retained (< {_MIN_READS:,}) — "
-               "may be insufficient for CheckV Complete on a typical phage")
+                "may be insufficient for CheckV Complete on a typical phage")
         log_warn(f"  ⚠ {msg}"); active_warnings.append(msg)
-
 
 # ── Completion panel ─────────────────────────────────────────────────────────
 
