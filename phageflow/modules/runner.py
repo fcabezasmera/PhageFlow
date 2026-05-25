@@ -21,8 +21,6 @@ _MODULE_ORDER = [
     "viral-id",
     "quality",
     "annotate",
-    "safety",
-    "report",
 ]
 
 
@@ -160,23 +158,4 @@ def _run_sample(
             from phageflow.modules.annotate import run as ann_run
             ann_run(cfg, sample_id=sample_id, genome=genome, force=force)
 
-    # ── 07 Safety (per candidate) ─────────────────────────────────────────────
-    if not _skip("safety"):
-        candidates = sorted(ann_ready.glob("*.fasta")) if ann_ready.exists() else []
-        for genome in candidates:
-            try:
-                from phageflow.modules.safety import run as safe_run
-                safe_run(cfg, sample_id=sample_id, genome=genome, force=force)
-            except Exception as e:
-                log_warn(f"  [{sample_id}] safety skipped for {genome.stem}: {e}")
 
-    # ── 08 Report (per candidate) ─────────────────────────────────────────────
-    if not _skip("report"):
-        candidates = sorted(ann_ready.glob("*.fasta")) if ann_ready.exists() else []
-        for genome in candidates:
-            try:
-                from phageflow.modules.report import run as rpt_run
-                rpt_run(cfg, sample_id=sample_id,
-                        candidate_id=genome.stem, force=force)
-            except Exception as e:
-                log_warn(f"  [{sample_id}] report skipped for {genome.stem}: {e}")

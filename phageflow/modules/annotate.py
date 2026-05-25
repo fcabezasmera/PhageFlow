@@ -1,83 +1,4 @@
-"""PhageFlow Module 06 — Structural and functional annotation.
-
-Three-tier annotation cascade with per-CDS delta tracking from tool TSVs.
-
-Pipeline:
-    Pharokka → Phold → Phynteny Transformer → plot (phold or pyGenomeViz)
-
-Output per candidate genome (candidate_id = genome filename stem):
-    results/06_annotation/{candidate_id}/
-        pharokka/   gene calling + PHROG (MMseqs2 + PyHMMER)
-        phold/      structure-based upgrade via ProstT5 + Foldseek
-        phynteny/   synteny + ESM2 upgrade (final GBK)
-        plots/      genome map — circular (phold plot) or linear (pyGenomeViz)
-
-    reports/06_annotation/
-        annotation_summary.tsv          per-candidate aggregate stats (all runs)
-        {candidate_id}/
-            {candidate_id}_pharokka.log
-            {candidate_id}_phold.log
-            {candidate_id}_phynteny.log
-            {candidate_id}_plot.log
-            {candidate_id}_delta_report.tsv
-
-─────────────────────────────────────────────────────────────────────────────
-Plot strategy
-─────────────────────────────────────────────────────────────────────────────
-  Single-contig genome (n_ctg == 1):
-      phold plot — circular map (PNG + SVG).
-      Reads /product, annotation_confidence, and Foldseek qualifiers.
-      Reference: phold.readthedocs.io/en/latest/tutorial/
-
-  Multi-contig genome (n_ctg > 1):
-      pyGenomeViz — single linear figure with one track per contig, drawn to
-      scale, colored by PHROG category (same palette as phold).
-      Rationale: phold plot generates one circular map per GBK record,
-      producing n × 2 files with no inter-contig context. A single linear
-      figure is more informative for fragmented assemblies.
-      Reference: Shimoyama 2022, bioRxiv 2022.11.24.517870
-
-  In both cases the input is the Phold GBK because:
-      1. phold plot reads /product, annotation_confidence, and Foldseek
-         qualifiers written by Phold — these drive colour coding and labels.
-      2. Phynteny does NOT modify /product; its predictions live only in
-         /phynteny_category, /phynteny_score, /phynteny_confidence.
-      3. Phold explicitly preserves non-CDS features (tRNA/tmRNA/CRISPR)
-         from the Pharokka input; Phynteny preservation is undocumented.
-
-─────────────────────────────────────────────────────────────────────────────
-Per-CDS delta tracking strategy
-─────────────────────────────────────────────────────────────────────────────
-Each tier exposes a dedicated per-CDS TSV:
-
-  Tier 1 — Pharokka: {prefix}_cds_final_merged_output.tsv
-      Columns of interest: locus_tag (or gene), annot, top_hit, phrog,
-                           category, vfdb_hit, card_hit
-      Reference: Bouras et al. 2023, Bioinformatics 39:btac776
-
-  Tier 2 — Phold: {prefix}_per_cds_predictions.tsv
-      Columns of interest: locus_tag, product, phrog_category,
-                           annotation_confidence, foldseek_evalue,
-                           foldseek_bitscore, foldseek_lddt, tm_score
-      annotation_confidence: high / medium / low — primary quality indicator.
-      Reference: Bouras et al. 2025, bioRxiv 2025.08.05.668817
-
-  Tier 3 — Phynteny Transformer: phynteny_per_cds_funcions.tsv
-      Columns of interest: locus_tag, phynteny_category,
-                           phynteny_score, phynteny_confidence
-      Note: 'funcions' is a confirmed typo in the tool output filename.
-      Phynteny adds /phynteny_* qualifiers to the GBK but does NOT modify
-      /product or /function — the prediction is purely additive.
-      Reference: Grigson et al. 2025, bioRxiv 2025.07.28.667340
-
-─────────────────────────────────────────────────────────────────────────────
-Non-CDS features (tRNA / tmRNA / CRISPR)
-─────────────────────────────────────────────────────────────────────────────
-  Phold explicitly preserves non-CDS features from the Pharokka GBK.
-  Phynteny preservation is NOT documented and must be validated at runtime.
-  The delta report counts non-CDS features from the Phold GBK.
-  A validation step warns if Phynteny altered the non-CDS count.
-"""
+"""Module"""
 
 from __future__ import annotations
 import csv
@@ -140,7 +61,6 @@ _PHROG_COLORS: dict[str, str] = {
     "connector":                                       "#20B2AA",
     "unknown function":                                "#D3D3D3",
 }
-
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
@@ -316,7 +236,6 @@ def run(
 
     return gbk_phold
 
-
 # ── Step 1: Pharokka ──────────────────────────────────────────────────────────
 
 def _run_pharokka(cfg, candidate_id, genome, pharokka_dir, gbk_out,
@@ -359,7 +278,6 @@ def _run_pharokka(cfg, candidate_id, genome, pharokka_dir, gbk_out,
         log_ok("  [Pharokka] OK")
     except Exception as e:
         log_warn(f"  [Pharokka] warning: {e}")
-
 
 # ── Step 2: Phold ─────────────────────────────────────────────────────────────
 
@@ -410,7 +328,6 @@ def _run_phold(cfg, candidate_id, input_gbk, phold_dir, gbk_out, rpt_dir, force)
     except Exception as e:
         log_warn(f"  [Phold] warning: {e}")
 
-
 # ── Step 3: Phynteny Transformer ──────────────────────────────────────────────
 
 def _run_phynteny(cfg, candidate_id, input_gbk, phynteny_dir, rpt_dir, force):
@@ -453,7 +370,6 @@ def _run_phynteny(cfg, candidate_id, input_gbk, phynteny_dir, rpt_dir, force):
     except Exception as e:
         log_warn(f"  [Phynteny] warning: {e}")
 
-
 def _find_phynteny_gbk(phynteny_dir: Path, candidate_id: str) -> Optional[Path]:
     """Locate Phynteny output GBK — checks known naming patterns before glob.
 
@@ -472,7 +388,6 @@ def _find_phynteny_gbk(phynteny_dir: Path, candidate_id: str) -> Optional[Path]:
         gbks  = list(phynteny_dir.glob("*.gbk"))
         found = gbks[0] if gbks else None
     return found
-
 
 # ── Step 4: Plot routing ──────────────────────────────────────────────────────
 
@@ -514,7 +429,6 @@ def _run_plots(
     else:
         _run_pygenomeviz_multi(candidate_id, gbk_phold, plots_dir, rpt_dir, n_ctg)
 
-
 def _run_phold_plot_single(
     candidate_id: str,
     gbk_phold:   Path,
@@ -552,7 +466,6 @@ def _run_phold_plot_single(
         )
     except Exception as e:
         log_warn(f"  [phold plot] warning: {e}")
-
 
 def _run_pygenomeviz_multi(
     candidate_id: str,
@@ -647,7 +560,6 @@ def _run_pygenomeviz_multi(
         )
         _run_phold_plot_single(candidate_id, gbk_phold, plots_dir, rpt_dir)
 
-
 # ── Per-CDS TSV parsers ───────────────────────────────────────────────────────
 
 def _parse_pharokka_per_cds(pharokka_dir: Path, candidate_id: str) -> dict:
@@ -718,7 +630,6 @@ def _parse_pharokka_per_cds(pharokka_dir: Path, candidate_id: str) -> dict:
         "cds_rows":      cds_rows,
     }
 
-
 def _parse_phold_per_cds(
     phold_dir:   Path,
     candidate_id: str,
@@ -774,7 +685,6 @@ def _parse_phold_per_cds(
         "low_conf":    low_conf,
         "phold_rows":  phold_rows,
     }
-
 
 def _parse_phynteny_per_cds(
     phynteny_dir:  Path,
@@ -848,7 +758,6 @@ def _parse_phynteny_per_cds(
         "source":        "tsv",
     }
 
-
 def _parse_phynteny_gbk_qualifiers_fallback(
     phynteny_dir:  Path,
     candidate_id:  str,
@@ -906,7 +815,6 @@ def _parse_phynteny_gbk_qualifiers_fallback(
         "source":        "gbk_fallback",
     }
 
-
 # ── Non-CDS feature validation ────────────────────────────────────────────────
 
 def _count_noncds_gbk(gbk_path: Path) -> dict[str, int]:
@@ -920,7 +828,6 @@ def _count_noncds_gbk(gbk_path: Path) -> dict[str, int]:
             re.findall(rf"^\s+{feat_type}\s", text, re.MULTILINE)
         )
     return counts
-
 
 def _validate_noncds_in_phold(
     gbk_pharokka: Path, gbk_phold: Path, tier1: dict,
@@ -939,7 +846,6 @@ def _validate_noncds_in_phold(
             log_warn(
                 f"  [non-CDS] {feat}: Pharokka={n_pk} vs Phold={n_ph}"
             )
-
 
 def _validate_noncds_in_phynteny(
     gbk_phold: Path, gbk_phynteny: Path,
@@ -966,7 +872,6 @@ def _validate_noncds_in_phynteny(
     else:
         log_ok("  [non-CDS] Phynteny preserved all non-CDS features from Phold GBK")
 
-
 # ── Per-CDS delta report ──────────────────────────────────────────────────────
 
 _DELTA_HEADERS = [
@@ -992,7 +897,6 @@ _DELTA_HEADERS = [
     # Summary
     "improved_at_tier",   # "1", "2", "3", or "" (still hypothetical)
 ]
-
 
 def _save_delta_report(
     candidate_id: str,
@@ -1096,7 +1000,6 @@ def _save_delta_report(
         f"→ {path.name}"
     )
 
-
 # ── Helper: locate phold per-CDS TSV ─────────────────────────────────────────
 
 def _find_phold_per_cds_tsv(
@@ -1117,7 +1020,6 @@ def _find_phold_per_cds_tsv(
             "Tier 2 delta will be 0. Check Phold output directory."
         )
     return found
-
 
 # ── Rich display helpers ──────────────────────────────────────────────────────
 
@@ -1201,7 +1103,6 @@ def _print_completion_panel(
         width=120,
     ))
 
-
 # ── Aggregate summary TSV ─────────────────────────────────────────────────────
 
 _SUMMARY_HEADERS = [
@@ -1215,7 +1116,6 @@ _SUMMARY_HEADERS = [
     "tier2_delta_source",
     "tier3_delta_source",
 ]
-
 
 def _save_summary_tsv(
     candidate_id: str,

@@ -1,95 +1,4 @@
-"""PhageFlow Module 04 — Viral identification (geNomad).
-
-Goal: identify viral contigs from the assembly, classify their topology,
-determine genetic code, and output a filtered viral FASTA for quality.py.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Tool: geNomad end-to-end
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-geNomad combines k-mer marker gene search (MMseqs2) and a neural-network
-classifier (Camargo et al. 2023, Nat Biotechnol 41:1783).
-
-Key flags used:
-
-  --enable-score-calibration --composition virome
-      Adjusts scores for virome-dominated samples (purified phage).
-      Reduces false negatives in novel lineages without close DB relatives.
-
-  --lenient-taxonomy
-      Resolves taxonomy below family rank (subfamily, genus, species).
-      Required for biologically meaningful co-binning in quality.py.
-      Without this, distinct genera within a family co-bin together.
-
-  --disable-find-proviruses
-      Skips provirus detection. For purified phage preparations, bacterial
-      chromosomes should be absent. If proviruses appear, it indicates
-      host-removal failure rather than genuine lysogeny.
-
-  --sensitivity 4.2
-      MMseqs2 marker search sensitivity (default). Increase to 5.7–7.5 for
-      more distant relatives at proportional time cost.
-
-  --splits 0
-      Automatic MMseqs2 memory management (geNomad default).
-      NOT a parallelism flag. Increase only if MMseqs2 OOMs.
-
-  --cleanup
-      Remove large intermediate files (annotate/ subdir) after classification.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Filtering
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Main tier   : virus_score ≥ min_score (default 0.7, ~97% precision)
-  Rescue tier : min_score > score ≥ rescue_min_score (0.4)
-                AND length ≥ rescue_min_length_bp (10 kb)
-                Novel phages with no close DB relatives score 0.4–0.6
-                despite being genuine phages (Camargo et al. 2023).
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Metadata propagation (critical for downstream modules)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  topology
-    Source: _virus_summary.tsv → column 'topology'
-    Values: DTR · ITR · No terminal repeats · Provirus · NA
-    Used by:
-      quality.py  → propagates to rename_map.tsv for downstream decisions
-      annotate.py → selects circular vs linear plot; gates dnaapler
-
-  genetic_code
-    Source: _virus_summary.tsv → column 'genetic_code'
-            Fallback: _virus_genes.tsv → mode per contig
-    Values: 11 (standard) · 15 (crAss-like: TGA=Trp)
-    Used by:
-      annotate.py → --genetic_code flag in Pharokka; ensures correct ORF
-                    prediction for CrAss-like phages (Crassvirales)
-                    Koonin et al. 2020, mBio 11:e00278-20
-
-  taxonomy (family + finest level)
-    Source: _virus_summary.tsv → column 'taxonomy'
-    Used by:
-      quality.py → co-binning at family level for candidate naming;
-                   finest level for biologically coherent grouping
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Output files
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  results/04_viral_id/
-      {sample_id}_virus.fna          ← viral contigs → quality.py --virus-fna
-      {sample_id}_metadata.tsv       ← topology + genetic_code + score per contig
-
-  reports/04_viral_id/{sample_id}/
-      genomad/                       ← geNomad output (TSVs after --cleanup)
-          {stem}/
-              {stem}_virus_summary.tsv
-              {stem}_virus_genes.tsv
-              {stem}_taxonomy.tsv
-      viral_id_summary.tsv
-      {sample_id}_viral_id.log
-"""
+"""Module"""
 
 from __future__ import annotations
 import csv
@@ -112,7 +21,6 @@ from phageflow.utils.tools import require_tools, run_silent, mkdirs
 
 STEP  = "04_viral_id"
 TOOLS = ["genomad"]
-
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
@@ -193,7 +101,6 @@ def run(
     log_step(f"Module 04 completed ✓  [{sample_id}]")
     return virus_fna, metadata_tsv
 
-
 # ── geNomad runner ────────────────────────────────────────────────────────────
 
 def _run_genomad(
@@ -248,7 +155,6 @@ def _run_genomad(
     )
     run_silent(cmd, log_file=log_f)
     log_ok("  [geNomad] classification complete")
-
 
 # ── Output processing ─────────────────────────────────────────────────────────
 
@@ -351,7 +257,6 @@ def _process_results(
         "topologies":      topo_str,
     }
 
-
 # ── geNomad output discovery ──────────────────────────────────────────────────
 
 def _find_genomad_outputs(genomad_dir: Path) -> tuple[Path, Path]:
@@ -371,7 +276,6 @@ def _find_genomad_outputs(genomad_dir: Path) -> tuple[Path, Path]:
     stem            = virus_summary_f.stem.replace("_virus_summary", "")
     virus_genes_f   = genomad_out / f"{stem}_virus_genes.tsv"
     return virus_summary_f, virus_genes_f
-
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
@@ -445,7 +349,6 @@ def _parse_virus_summary(
             }
     return hits
 
-
 def _parse_genetic_codes_from_genes(path: Path, viral_seqs: set) -> dict:
     """Parse _virus_genes.tsv for genetic_code per contig (mode across genes).
 
@@ -474,7 +377,6 @@ def _parse_genetic_codes_from_genes(path: Path, viral_seqs: set) -> dict:
         contig: Counter(vals).most_common(1)[0][0]
         for contig, vals in codes.items()
     }
-
 
 def _parse_taxonomy(taxonomy_str: str) -> dict:
     """Extract family and finest level from geNomad semicolon-separated lineage.
@@ -528,7 +430,6 @@ def _parse_taxonomy(taxonomy_str: str) -> dict:
 
     return {"family": family, "finest": finest, "naming_level": naming_level}
 
-
 # ── FASTA extraction ──────────────────────────────────────────────────────────
 
 def _extract_viral_fastas(
@@ -552,14 +453,12 @@ def _extract_viral_fastas(
                 f_out.write(line)
     return n
 
-
 # ── Metadata TSV ──────────────────────────────────────────────────────────────
 
 _META_HEADERS = [
     "seq_name", "length", "virus_score", "n_hallmarks",
     "topology", "genetic_code", "family", "finest", "naming_level", "taxonomy", "status",
 ]
-
 
 def _write_metadata(hits: dict, path: Path) -> None:
     """Write per-contig metadata TSV.
@@ -589,7 +488,6 @@ def _write_metadata(hits: dict, path: Path) -> None:
                 "status":      info["status"],
             })
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _count_fasta(path: Path) -> int:
@@ -603,11 +501,9 @@ def _count_fasta(path: Path) -> int:
                 n += 1
     return n
 
-
 def _collect_families(hits: dict) -> list[tuple[str, int]]:
     """Return sorted list of (family, count) by frequency."""
     return Counter(v["family"] for v in hits.values()).most_common()
-
 
 def _collect_naming_levels(hits: dict) -> list[tuple[str, int]]:
     """Return sorted list of (naming_level, count) by frequency.
@@ -616,7 +512,6 @@ def _collect_naming_levels(hits: dict) -> list[tuple[str, int]]:
     family if known, finest otherwise, 'Phage' if unclassified.
     """
     return Counter(v.get("naming_level", "Phage") for v in hits.values()).most_common()
-
 
 # ── Completion panel ──────────────────────────────────────────────────────────
 
@@ -680,14 +575,12 @@ def _print_completion_panel(
         border_style="cyan", padding=(0, 2), width=120,
     ))
 
-
 # ── TSV summary ───────────────────────────────────────────────────────────────
 
 _TSV_HEADERS = [
     "sample", "n_input_contigs", "n_viral", "n_main", "n_rescued",
     "top_family", "top_naming_level", "n_known_family", "has_crasslike", "topologies",
 ]
-
 
 def _save_tsv(row: dict, path: Path) -> None:
     rows: dict[str, dict] = {}

@@ -1,21 +1,4 @@
-"""PhageFlow Module 02 — Host read removal.
-
-Primary mode  : bwa-mem2 (alignment-based, streaming, no BAM on disk)
-Alternative   : Kraken2 (classification-based, when no reference available)
-
-bwa-mem2 pipeline:
-    bwa-mem2 mem | samtools view -bF 2304 | samtools sort -n | samtools fastq
-      -f 4 -F 256  → unmapped reads (phage pairs)
-      -s           → one mate unmapped → DTR/ITR singletons → SPAdes --s1
-      -0 /dev/null → mapped (host) → discard
-
-Singleton recovery is critical for phages with DTR/ITR termini — reads
-spanning the circular junction are discarded by paired-mode tools but
-improve terminal coverage and CheckV Complete classification
-(Nayfach et al. 2021, Nat Biotechnol 39:578).
-
-samtools ≥ 1.15 required for `samtools fastq -N`.
-"""
+"""Module"""
 from __future__ import annotations
 import subprocess
 import sys
@@ -49,7 +32,6 @@ _K2_UNCLASS_WARN = 0.30
 _MIN_READS       = 50_000
 _SAMTOOLS_MIN_VERSION = (1, 15)
 _LEVEL_A_SUBSAMPLE    = 50_000
-
 
 def run(
     cfg:             Config,
@@ -217,7 +199,6 @@ def run(
     )
     return r1_out, r2_out, singleton_out
 
-
 # ── samtools version check ────────────────────────────────────────────────────
 
 def _check_samtools_version() -> None:
@@ -235,7 +216,6 @@ def _check_samtools_version() -> None:
                 )
     except Exception:
         log_warn("  Could not verify samtools version — ensure ≥1.15 is active.")
-
 
 # ── Reference resolution ──────────────────────────────────────────────────────
 
@@ -272,7 +252,6 @@ def _resolve_fastas(
         fastas += _download_accessions(all_accs, host_dir, rpt_dir)
     return fastas
 
-
 def _download_accessions(accs: List[str], host_dir: Path, rpt_dir: Path) -> List[Path]:
     require_tools("datasets")
     dl_dir   = host_dir / "ncbi_dataset"
@@ -298,7 +277,6 @@ def _download_accessions(accs: List[str], host_dir: Path, rpt_dir: Path) -> List
         log_ok(f"  datasets · downloaded {len(fastas)} genome(s)")
     return fastas
 
-
 def _build_index(fastas: List[Path], combined: Path, rpt_dir: Path, force: bool) -> None:
     idx = Path(str(combined) + ".bwt.2bit.64")
     if idx.exists() and not force:
@@ -317,14 +295,12 @@ def _build_index(fastas: List[Path], combined: Path, rpt_dir: Path, force: bool)
     run_silent(["samtools", "faidx", str(combined)], log_file=rpt_dir / "bwa_index.log")
     log_ok("  [bwa-mem2] index ready")
 
-
 def _cleanup_ncbi_download(host_dir: Path) -> None:
     """Remove raw NCBI download folder after combined FASTA is built."""
     ncbi_dir = host_dir / "ncbi_dataset"
     if ncbi_dir.exists():
         shutil.rmtree(ncbi_dir, ignore_errors=True)
         log_info("  [cleanup] ncbi_dataset/ removed — combined FASTA retained")
-
 
 # ── bwa-mem2 streaming pipeline ───────────────────────────────────────────────
 
@@ -365,7 +341,6 @@ def _run_bwa_pipeline(
         "pct_host": pct_h, "pct_phage": pct_p, "pct_singleton": pct_s,
     }
 
-
 def _count_reads_fastq(path: Path, threads: int = 4) -> int:
     if not path.exists() or path.stat().st_size == 0:
         return 0
@@ -376,7 +351,6 @@ def _count_reads_fastq(path: Path, threads: int = 4) -> int:
         return int(r.stdout.strip()) // 4
     except Exception:
         return 0
-
 
 # ── Level A: post-extraction contamination check ──────────────────────────────
 
@@ -470,7 +444,6 @@ def _level_a_check(
     else:
         log_ok(f"  [Level A] {bacteria_pct:.1f}% bacterial (threshold: {warn_pct}%) — OK")
 
-
 # ── Level B: adaptive post-filter ────────────────────────────────────────────
 
 def _level_b_postfilter(
@@ -519,7 +492,6 @@ def _level_b_postfilter(
         log_ok(f"  [Level B] {n_sin:,} DTR/ITR singletons recovered from Kraken2 loss")
     return stats
 
-
 def _parse_contaminants_from_report(report: Path, min_pct: float) -> list[int]:
     taxids: list[int] = []
     if not report.exists(): return taxids
@@ -539,7 +511,6 @@ def _parse_contaminants_from_report(report: Path, min_pct: float) -> list[int]:
                 if depth <= bact_depth: break
                 if pct >= min_pct: taxids.append(taxid)
     return taxids
-
 
 def _download_by_taxids(taxids: list[int], dest_dir: Path, rpt_dir: Path) -> List[Path]:
     require_tools("datasets")
@@ -567,7 +538,6 @@ def _download_by_taxids(taxids: list[int], dest_dir: Path, rpt_dir: Path) -> Lis
             log_warn(f"  [Level B] taxid {taxid}: {e}")
     return fastas
 
-
 # ── Kraken2 pipeline ──────────────────────────────────────────────────────────
 
 def _classify_kraken2(sample_id, r1, r2, db, tmp_dir, rpt_dir, log_f, threads) -> tuple:
@@ -581,7 +551,6 @@ def _classify_kraken2(sample_id, r1, r2, db, tmp_dir, rpt_dir, log_f, threads) -
         "--threads", str(threads), str(r1), str(r2),
     ], log_file=log_f, check=False)
     return report, k2_out
-
 
 def _extract_phage_kraken2(sample_id, r1, r2, r1_out, r2_out,
                             report, k2_out, tmp_dir, log_f) -> dict:
@@ -618,7 +587,6 @@ def _extract_phage_kraken2(sample_id, r1, r2, r1_out, r2_out,
         "pct_singleton": "N/A", "k2_unclass": str(n_unclass), "k2_viral": str(n_viral),
     }
 
-
 def _parse_viral_taxids(report: Path) -> set:
     taxids: set = set()
     if not report.exists(): return taxids
@@ -638,7 +606,6 @@ def _parse_viral_taxids(report: Path) -> set:
                 else: in_viral = False; viral_depth = None
     return taxids
 
-
 def _extract_viral_ids(k2_out: Path, viral_taxids: set, out_file: Path) -> int:
     n = 0
     if not k2_out.exists() or not viral_taxids: return n
@@ -651,7 +618,6 @@ def _extract_viral_ids(k2_out: Path, viral_taxids: set, out_file: Path) -> int:
             if len(parts) >= 3 and parts[2].strip() in viral_taxids_str:
                 f_out.write(parts[1] + "\n"); n += 1
     return n
-
 
 def _merge_reads(un_r1, un_r2, src_r1, src_r2, r1_out, r2_out,
                  viral_ids, n_viral, log_f) -> None:
@@ -670,7 +636,6 @@ def _merge_reads(un_r1, un_r2, src_r1, src_r2, r1_out, r2_out,
     if cmds:
         run_silent(" & ".join(cmds) + " & wait", log_file=log_f, shell=True, check=False)
 
-
 # ── Validation & warnings ─────────────────────────────────────────────────────
 
 def _validate_output(r1_out, r2_out, singleton_out, stats, active_warnings) -> None:
@@ -687,7 +652,6 @@ def _validate_output(r1_out, r2_out, singleton_out, stats, active_warnings) -> N
         else:
             log_ok(f"  [validate] {n:,} phage reads retained — OK")
     except (ValueError, TypeError): pass
-
 
 def _check_warnings(stats, mode, active_warnings) -> None:
     try:
@@ -709,7 +673,6 @@ def _check_warnings(stats, mode, active_warnings) -> None:
                        "in Kraken2 DB. Use bwa-mem2 mode with --host-file.")
                 log_warn(f"  [Kraken2] {msg}"); active_warnings.append(msg)
         except (ValueError, TypeError): pass
-
 
 # ── Completion panel ──────────────────────────────────────────────────────────
 
@@ -765,14 +728,12 @@ def _print_completion_panel(
                         title=f"[bold cyan]Host removal complete — {sample_id}[/bold cyan]",
                         border_style="cyan", padding=(0, 2), width=120))
 
-
 # ── TSV summary ───────────────────────────────────────────────────────────────
 
 _TSV_HEADERS = [
     "sample", "mode", "reads_in", "reads_phage", "reads_singleton",
     "pct_host", "pct_phage", "pct_singleton", "k2_unclass", "k2_viral",
 ]
-
 
 def _save_tsv(row: dict, path: Path) -> None:
     rows: dict[str, dict] = {}

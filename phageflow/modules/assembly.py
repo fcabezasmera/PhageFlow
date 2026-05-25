@@ -1,25 +1,4 @@
-"""PhageFlow Module 03 — De novo assembly.
-
-Strategy: SPAdes (primary) + MEGAHIT (secondary) → cd-hit-est NR reduction.
-
-SPAdes --isolate
-  Optimised for high-coverage isolates; disables BayesHammer error correction.
-  At >200× coverage, correction collapses real SNPs (Prjibelski et al. 2020).
-  --only-assembler is implied by --isolate — do NOT pass both (SPAdes error).
-  --s1 singletons: DTR/ITR boundary reads from bwa-mem2 host removal.
-  Improves terminal coverage → CheckV Complete (Nayfach et al. 2021).
-
-MEGAHIT --no-mercy --min-count 2
-  --no-mercy disables low-depth rescue at high coverage (Li et al. 2015).
-  Does NOT support --s1; singletons omitted.
-
-cd-hit-est -c 1.00 -aS 0.85
-  Removes exact duplicates and near-identical contigs from both assemblers.
-  Fu et al. 2012, Bioinformatics 28:3150.
-
-Why contigs.fasta and not scaffolds.fasta?
-  SPAdes scaffolds contain N-runs that break CheckV DTR/ITR detection.
-"""
+"""Module"""
 from __future__ import annotations
 import shutil
 import subprocess
@@ -43,7 +22,6 @@ TOOLS = ["spades.py", "megahit", "cd-hit-est"]
 
 _N50_WARN        = 5_000
 _MAX_CONTIG_WARN = 500_000
-
 
 def run(
     cfg:       Config,
@@ -152,7 +130,6 @@ def run(
     log_step(f"Module 03 completed ✓  [{sample_id}]")
     return contigs_out
 
-
 # ── SPAdes ────────────────────────────────────────────────────────────────────
 
 def _run_spades(
@@ -200,7 +177,6 @@ def _run_spades(
     _cleanup_spades(out_dir)
     return True
 
-
 def _cleanup_spades(out_dir: Path) -> None:
     """Remove SPAdes intermediates; keep contigs.fasta, assembly_graph.gfa, spades.log."""
     keep = {"contigs.fasta", "assembly_graph.gfa", "assembly_graph.fastg",
@@ -212,7 +188,6 @@ def _cleanup_spades(out_dir: Path) -> None:
             else:
                 child.unlink(missing_ok=True)
     log_info("  [SPAdes] intermediates removed")
-
 
 # ── MEGAHIT ───────────────────────────────────────────────────────────────────
 
@@ -226,7 +201,6 @@ def _megahit_supports_klist() -> bool:
         return "--k-list" in (r.stdout + r.stderr)
     except Exception:
         return False
-
 
 def _run_megahit(
     r1: Path, r2: Path,
@@ -279,7 +253,6 @@ def _run_megahit(
     log_ok(f"  [MEGAHIT] {s['n']:,} contigs  N50={s['n50_bp']:,} bp  "
            f"largest={s['largest_bp']:,} bp")
     return True
-
 
 # ── Combine + filter + NR ─────────────────────────────────────────────────────
 
@@ -358,7 +331,6 @@ def _combine_and_dereplicate(
         "n50_bp":     str(stats["n50_bp"]),
     }
 
-
 def _write_tagged_fasta(in_fa: Path, out_fh, tag: str, min_len: int) -> int:
     """Write contigs ≥ min_len to out_fh, prefixing headers with [tag]."""
     n = 0
@@ -386,7 +358,6 @@ def _write_tagged_fasta(in_fa: Path, out_fh, tag: str, min_len: int) -> int:
         _flush()
     return n
 
-
 # ── Sequence utilities ────────────────────────────────────────────────────────
 
 def _fasta_stats(path: Path) -> dict:
@@ -411,7 +382,6 @@ def _fasta_stats(path: Path) -> dict:
         "n50_bp":     _n50(lengths),
     }
 
-
 def _n50(lengths: list[int]) -> int:
     sorted_l = sorted(lengths, reverse=True)
     half     = sum(sorted_l) / 2
@@ -421,7 +391,6 @@ def _n50(lengths: list[int]) -> int:
         if cumsum >= half:
             return l
     return 0
-
 
 # ── Warnings ──────────────────────────────────────────────────────────────────
 
@@ -445,7 +414,6 @@ def _check_assembly_warnings(stats: dict, active_warnings: list[str]) -> None:
             log_warn(f"  {msg}"); active_warnings.append(msg)
     except (ValueError, TypeError):
         pass
-
 
 # ── Completion panel ──────────────────────────────────────────────────────────
 
@@ -501,7 +469,6 @@ def _print_completion_panel(
         border_style="cyan", padding=(0, 2), width=120,
     ))
 
-
 # ── TSV summary ───────────────────────────────────────────────────────────────
 
 _TSV_HEADERS = [
@@ -509,7 +476,6 @@ _TSV_HEADERS = [
     "n_spades", "n_megahit", "n_combined", "n_final",
     "total_bp", "largest_bp", "n50_bp", "kmers",
 ]
-
 
 def _save_tsv(row: dict, path: Path) -> None:
     rows: dict[str, dict] = {}

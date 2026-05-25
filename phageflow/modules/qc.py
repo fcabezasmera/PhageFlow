@@ -1,16 +1,4 @@
-"""PhageFlow Module 01 — Quality control and trimming.
-
-Tools  : fastp · FastQC · MultiQC
-Target : purified phage Illumina PE150 → CheckV Complete / HQ
-
-Key design decisions:
-  Q≥25 per-base + read-mean-Q≥22   Wick & Holt 2022
-  PE overlap correction             Chen et al. 2018
-  --low_complexity_filter 20%       Roux et al. 2019 MIUViG
-  --trim_poly_x                     Chen et al. 2018 (NextSeq/NovaSeq G-tails)
-  NO deduplication                  Head et al. 2014 — apparent duplicates at
-                                    >100× are real reads, not PCR artefacts
-"""
+"""Module"""
 from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,7 +25,6 @@ _Q30_GOOD  = 80.0
 _Q30_WARN  = 70.0
 _MIN_READS     = 100_000
 _REF_GENOME_BP = 50_000
-
 
 def run(
     cfg:       Config,
@@ -114,7 +101,6 @@ def run(
     )
     return r1_out, r2_out
 
-
 def _run_fastp(
     sample_id: str,
     r1: Path, r2: Path,
@@ -159,7 +145,6 @@ def _run_fastp(
         ]
     run_silent(cmd, log_file=log_f)
 
-
 def _run_fastqc(r1: Path, r2: Path, out_dir: Path, log_f: Path) -> None:
     def _one(read: Path) -> None:
         if not read.exists():
@@ -176,7 +161,6 @@ def _run_fastqc(r1: Path, r2: Path, out_dir: Path, log_f: Path) -> None:
         for fut in as_completed({ex.submit(_one, r) for r in (r1, r2)}):
             fut.result()
 
-
 def _run_multiqc(rpt_dir: Path, sample_id: str) -> None:
     mqc_dir = rpt_dir / "multiqc"
     mkdirs(mqc_dir)
@@ -191,7 +175,6 @@ def _run_multiqc(rpt_dir: Path, sample_id: str) -> None:
         )
     except Exception as e:
         log_warn(f"  [MultiQC] {e}")
-
 
 def _parse_fastp_json(json_f: Path) -> dict:
     empty = {
@@ -225,7 +208,6 @@ def _parse_fastp_json(json_f: Path) -> dict:
         }
     except Exception:
         return empty
-
 
 def _check_warnings(m: dict, active_warnings: list[str]) -> None:
     def _pct(key: str) -> float:
@@ -270,7 +252,6 @@ def _check_warnings(m: dict, active_warnings: list[str]) -> None:
         )
         log_warn(f"  ⚠ {msg}"); active_warnings.append(msg)
 
-
 def _print_completion_panel(
     sample_id, r1_out, r2_out, rpt_dir, m: dict, active_warnings: list[str],
 ) -> None:
@@ -309,12 +290,10 @@ def _print_completion_panel(
         border_style="cyan", padding=(0, 2), width=120,
     ))
 
-
 _TSV_HEADERS = [
     "sample_id", "reads_in", "reads_out", "pct_pass",
     "q20_pct", "q30_pct", "gc_pct", "dup_pct", "bp_out", "est_coverage_50kb",
 ]
-
 
 def _save_tsv(sample_id: str, m: dict, path: Path) -> None:
     rows: dict = {}

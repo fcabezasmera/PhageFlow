@@ -1,69 +1,4 @@
-"""PhageFlow Module 05b — Iterative assembly refinement.
-
-Goal: improve fragmented phage genomes by re-assembling with the best
-available candidates as anchors (--trusted-contigs) and the reads that
-did not map to any candidate as extension material.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-When to use
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Run AFTER quality.py when annotation_ready contains fragmented assemblies:
-  - Multiple candidates from the same naming_level (redundancy warning)
-  - MQ or large-ND candidates instead of Complete/HQ
-  - quality.py coverage breadth < 95%
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Strategy
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  [1/5] Build combined reference from annotation_ready candidates
-  [2/5] Map ALL reads to combined reference (bwa-mem2)
-        Extract:
-          unmapped pairs   → reads from regions NOT in any candidate
-          semi-mapped      → reads bridging a candidate end and a gap
-  [3/5] Re-assemble with SPAdes:
-          --trusted-contigs combined_candidates.fasta
-          --only-assembler (skip error correction)
-          Unmapped pairs as primary input
-          Semi-mapped as singletons (--s1)
-          Singletons from host-removal as additional --s1
-  [4/5] Run CheckV on refined assembly
-  [5/5] Compare: replace candidates if refinement improves quality tier or
-        produces a Complete/HQ genome from MQ fragments
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Scientific basis
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Bankevich et al. 2012 (J Comput Biol 19:455) — SPAdes --trusted-contigs
-    anchors the assembly graph at known correct sequences and allows
-    extension through complex repeat regions.
-  Wan et al. 2023 (mSystems 8:e01334) — iterative assembly with read
-    recruitment substantially improved completeness for large phage genomes
-    (>150 kb) fragmented by repeat-induced graph ambiguities.
-  Al-Shayeb et al. 2020 (Nature 578:425) — multi-iterative assembly was
-    necessary for jumbo phage genomes (>200 kb).
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Output
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Refined candidates replace existing annotation_ready/phages/*.fasta.
-  Original candidates backed up to annotation_ready/phages/pre_refine/.
-  rename_map.tsv updated with refined candidate info.
-
-  results/05_quality/{sample_id}/
-      annotation_ready/phages/
-          {naming_level}_candidate_001.fasta   ← may be refined
-      annotation_ready/phages/pre_refine/
-          {naming_level}_candidate_001.fasta   ← original backup
-
-  reports/05b_refine/{sample_id}/
-      spades_refine/                           ← SPAdes output (trimmed)
-      checkv_refine/                           ← CheckV on refined assembly
-      {sample_id}_refine.log
-"""
+"""Module"""
 
 from __future__ import annotations
 import csv
@@ -92,7 +27,6 @@ _TIER_ORDER = {
     "Complete": 4, "High-quality": 3, "Medium-quality": 2,
     "Low-quality": 1, "Not-determined": 0, "": 0,
 }
-
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
@@ -220,7 +154,6 @@ def run(
     log_step(f"Module 05b completed ✓  [{sample_id}]")
     return ann_phages
 
-
 # ── Reference building ────────────────────────────────────────────────────────
 
 def _build_combined_reference(candidates: list[Path], combined: Path) -> None:
@@ -241,7 +174,6 @@ def _build_combined_reference(candidates: list[Path], combined: Path) -> None:
             if seq_parts:
                 out.write("".join(seq_parts) + "\n")
     log_info(f"  [ref] Combined {len(candidates)} candidates → {combined.name}")
-
 
 # ── Read extraction ───────────────────────────────────────────────────────────
 
@@ -297,7 +229,6 @@ def _extract_unmapped_reads(
     n_semi     = _count_fastq(semi_mapped)
     return n_unmapped, n_semi
 
-
 def _count_fastq(path: Path) -> int:
     if not path.exists() or path.stat().st_size == 0:
         return 0
@@ -311,7 +242,6 @@ def _count_fastq(path: Path) -> int:
         return int(r.stdout.strip()) // 4
     except Exception:
         return 0
-
 
 # ── SPAdes refinement ─────────────────────────────────────────────────────────
 
@@ -387,7 +317,6 @@ def _run_spades_refine(
     except Exception as e:
         log_warn(f"  [SPAdes-refine] failed: {e}")
 
-
 def _cleanup_spades(out_dir: Path) -> None:
     keep = {"contigs.fasta", "assembly_graph.gfa", "assembly_graph.fastg", "spades.log"}
     for child in list(out_dir.iterdir()):
@@ -396,7 +325,6 @@ def _cleanup_spades(out_dir: Path) -> None:
                 shutil.rmtree(child, ignore_errors=True)
             else:
                 child.unlink(missing_ok=True)
-
 
 # ── CheckV evaluation ─────────────────────────────────────────────────────────
 
@@ -413,7 +341,6 @@ def _run_checkv(
         log_file=log_f,
     )
     log_ok("  [CheckV-refine] quality assessment complete")
-
 
 def _load_checkv_quality(checkv_dir: Path) -> dict:
     """Load CheckV quality_summary.tsv → {contig_id: {quality, completeness, length}}"""
@@ -432,7 +359,6 @@ def _load_checkv_quality(checkv_dir: Path) -> dict:
                 "termini":     row.get("termini_type", ""),
             }
     return result
-
 
 # ── Comparison and replacement ────────────────────────────────────────────────
 
@@ -527,7 +453,6 @@ def _apply_refinements(
 
     return n_replaced, n_new
 
-
 def _infer_original_quality(fa: Path) -> dict:
     """Read quality from FASTA header comment written by quality.py."""
     with open(fa) as f:
@@ -551,11 +476,9 @@ def _infer_original_quality(fa: Path) -> dict:
                 pass
     return {"quality": quality, "completeness": completeness, "length": length}
 
-
 def _best_orig_length(orig_quality: dict) -> int:
     lengths = [q.get("length", 0) for q in orig_quality.values()]
     return max(lengths) if lengths else 0
-
 
 def _load_fasta(path: Path) -> dict[str, str]:
     seqs: dict[str, str] = {}
@@ -574,7 +497,6 @@ def _load_fasta(path: Path) -> dict[str, str]:
             seqs[current_id] = "".join(parts)
     return seqs
 
-
 def _write_candidate_fasta(path: Path, cand_id: str, seq: str, q: dict) -> None:
     with open(path, "w") as f:
         f.write(
@@ -587,7 +509,6 @@ def _write_candidate_fasta(path: Path, cand_id: str, seq: str, q: dict) -> None:
         )
         for i in range(0, len(seq), 60):
             f.write(seq[i:i+60] + "\n")
-
 
 # ── Completion panel ──────────────────────────────────────────────────────────
 

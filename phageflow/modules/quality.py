@@ -145,11 +145,16 @@ _CKV_ND       = "Not-determined"
 # ICTV species boundary is 95% ANI. Turner et al. 2021, Arch Virol 166:2633.
 _MASH_DIST_THRESH = 0.02
 
+# BLAST-based dereplication thresholds (used for large genomes, more sensitive than mash)
+# 95% ANI = ICTV species boundary (Turner et al. 2021, Arch Virol 166:2633)
+# 80% coverage = minimum overlap to consider same genome
+_BLAST_ANI_THRESH = 95.0
+_BLAST_COV_THRESH = 0.80
+
 # Genome size threshold for dereplication method selection.
 # < threshold : minimap2 asm5 (mash unreliable on small genomes — sparse sketch)
 # ≥ threshold : mash (fast pairwise on full genome k-mer content)
 _SMALL_GENOME_THRESH = 20_000
-
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
@@ -160,18 +165,7 @@ def run(
     force:        bool = False,
     metadata_tsv: Optional[Path] = None,
 ) -> tuple[Path, Path]:
-    """Quality assessment and candidate selection for a single sample.
-
-    Parameters
-    ----------
-    virus_fna    : viral FASTA from viral_id step
-    metadata_tsv : per-contig metadata from viral_id (topology, genetic_code).
-                   Auto-discovered from results/04_viral_id/ if not provided.
-
-    Returns
-    -------
-    (annotation_ready_dir, drafts_dir)
-    """
+    """Module"""
     virus_fna = Path(virus_fna)
     out_dir   = cfg.results(STEP) / sample_id
     rpt_dir   = cfg.reports(STEP) / sample_id
@@ -289,7 +283,6 @@ def run(
     log_step(f"Module 05 completed ✓  [{sample_id}]")
     return ann_phages, drafts_dir
 
-
 # ── CheckV ────────────────────────────────────────────────────────────────────
 
 def _run_checkv(
@@ -320,7 +313,6 @@ def _run_checkv(
     )
     log_ok("  [CheckV] quality assessment complete")
 
-
 def _load_checkv_results(checkv_dir: Path) -> list[dict]:
     """Load CheckV quality_summary.tsv."""
     summary = checkv_dir / "quality_summary.tsv"
@@ -335,7 +327,6 @@ def _load_checkv_results(checkv_dir: Path) -> list[dict]:
             rows.append(dict(row))
     return rows
 
-
 def _load_metadata(path: Path) -> dict:
     """Load viral_id metadata TSV as {seq_name: {topology, genetic_code, ...}}."""
     meta = {}
@@ -346,7 +337,6 @@ def _load_metadata(path: Path) -> dict:
         for row in reader:
             meta[row["seq_name"]] = dict(row)
     return meta
-
 
 def _load_fasta(path: Path) -> dict[str, str]:
     """Load FASTA into {seq_id: sequence} dict."""
@@ -365,7 +355,6 @@ def _load_fasta(path: Path) -> dict[str, str]:
         if current_id:
             seqs[current_id] = "".join(parts)
     return seqs
-
 
 # ── Tier assignment ───────────────────────────────────────────────────────────
 
@@ -469,11 +458,9 @@ def _assign_tiers(
 
     return result
 
-
 def _float_safe(val) -> float:
     try: return float(val)
     except (ValueError, TypeError): return 0.0
-
 
 # ── Special case warnings ─────────────────────────────────────────────────────
 
@@ -511,7 +498,6 @@ def _warn_special_cases(
         )
         log_warn(f"  {msg}")
         active_warnings.append(msg)
-
 
 # ── Dereplication ─────────────────────────────────────────────────────────────
 
@@ -566,11 +552,16 @@ def _dereplicate(
     has_minimap = bool(shutil.which("minimap2"))
 
     if len(large) >= 2:
-        if has_mash:
+        has_blast = bool(shutil.which("blastn") and shutil.which("makeblastdb"))
+        if has_blast:
+            clusters += _cluster_blastn(large, seqs, threads)
+        elif has_mash:
+            log_warn("  [derep] blastn not found — falling back to mash for large genomes.")
+            active_warnings.append("blastn not found; used mash for large-genome dereplication (less sensitive)")
             clusters += _cluster_mash(large, seqs, threads)
         else:
-            log_warn("  [derep] mash not found — using cd-hit-est for large genomes.")
-            active_warnings.append("mash not found; used cd-hit-est for large-genome dereplication")
+            log_warn("  [derep] blastn/mash not found — using cd-hit-est for large genomes.")
+            active_warnings.append("blastn/mash not found; used cd-hit-est for large-genome dereplication")
             clusters += _cluster_cdhit(large, seqs, threads)
 
     if len(small) >= 2:
@@ -603,7 +594,6 @@ def _dereplicate(
         )
     return contigs
 
-
 class _UnionFind:
     def __init__(self, ids):
         self.parent = {i: i for i in ids}
@@ -624,7 +614,6 @@ class _UnionFind:
         for x in self.parent:
             g[self.find(x)].append(x)
         return list(g.values())
-
 
 def _cluster_mash(singles: list, seqs: dict, threads: int) -> list[list]:
     """Cluster sequences using mash at MASH_DIST_THRESH."""
@@ -677,6 +666,84 @@ def _cluster_mash(singles: list, seqs: dict, threads: int) -> list[list]:
                     uf.union(ref_id, qry_id)
 
     return uf.groups()
+
+def _cluster_blastn(singles: list, seqs: dict, threads: int) -> list[list]:
+    """Cluster sequences using blastn all-vs-all alignment.
+
+    More sensitive than mash for detecting near-identical sequences,
+    including non-overlapping fragments of the same genome whose k-mer
+    content is disjoint (mash would report high distance for these).
+
+    Two genomes are considered the same strain if:
+      identity (pident) >= 95%  AND  coverage >= 80% of shorter sequence
+
+    The coverage criterion handles assembly artifacts at termini where
+    one contig is slightly longer than another but represents the same genome.
+
+    Turner et al. 2021, Arch Virol 166:2633 — 95% ANI = ICTV species boundary.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        fasta = tmp / "candidates.fasta"
+        with open(fasta, "w") as f:
+            for seq in singles:
+                if seq in seqs:
+                    f.write(f">{seq}\n{seqs[seq]}\n")
+
+        db = tmp / "blastdb"
+        try:
+            subprocess.run(
+                ["makeblastdb", "-in", str(fasta), "-dbtype", "nucl",
+                 "-out", str(db), "-parse_seqids"],
+                capture_output=True, check=True, timeout=60,
+            )
+        except Exception:
+            log_warn("  [derep] makeblastdb failed — falling back to cd-hit-est")
+            return _cluster_cdhit(singles, seqs, threads)
+
+        blast_out = tmp / "blast.tsv"
+        try:
+            subprocess.run(
+                ["blastn", "-query", str(fasta), "-db", str(db),
+                 "-outfmt", "6 qseqid sseqid pident length qlen slen evalue bitscore",
+                 "-evalue", "1e-10",
+                 "-num_threads", str(min(threads, 8)),
+                 "-out", str(blast_out)],
+                capture_output=True, check=True, timeout=600,
+            )
+        except Exception:
+            log_warn("  [derep] blastn failed — falling back to cd-hit-est")
+            return _cluster_cdhit(singles, seqs, threads)
+
+        uf = _UnionFind(singles)
+        if blast_out.exists():
+            with open(blast_out) as f:
+                for line in f:
+                    parts = line.strip().split("\t")
+                    if len(parts) < 6:
+                        continue
+                    try:
+                        qseqid = parts[0]
+                        sseqid = parts[1]
+                        pident = float(parts[2])
+                        aln_len = int(parts[3])
+                        qlen   = int(parts[4])
+                        slen   = int(parts[5])
+                    except (ValueError, IndexError):
+                        continue
+
+                    if qseqid == sseqid:
+                        continue
+                    if qseqid not in singles or sseqid not in singles:
+                        continue
+
+                    min_len  = min(qlen, slen)
+                    coverage = aln_len / min_len if min_len > 0 else 0.0
+
+                    if pident >= _BLAST_ANI_THRESH and coverage >= _BLAST_COV_THRESH:
+                        uf.union(qseqid, sseqid)
+
+        return uf.groups()
 
 
 def _cluster_minimap2(singles: list, seqs: dict, threads: int) -> list[list]:
@@ -747,7 +814,6 @@ def _cluster_minimap2(singles: list, seqs: dict, threads: int) -> list[list]:
 
         return uf.groups()
 
-
 def _cluster_cdhit(singles: list, seqs: dict, threads: int) -> list[list]:
     """Fallback: cd-hit-est at 98% for dereplication."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -786,7 +852,6 @@ def _cluster_cdhit(singles: list, seqs: dict, threads: int) -> list[list]:
         if current:
             clusters.append(current)
         return clusters or [[s] for s in singles]
-
 
 # ── Co-binning ────────────────────────────────────────────────────────────────
 
@@ -839,7 +904,6 @@ def _cobin_drafts(contigs: dict, min_bin_bp: int) -> dict:
             )
 
     return contigs
-
 
 # ── Write outputs ─────────────────────────────────────────────────────────────
 
@@ -982,7 +1046,6 @@ def _write_outputs(
         "n_discarded":   str(n_disc),
     }
 
-
 # ── Rename map ────────────────────────────────────────────────────────────────
 
 _RENAME_HEADERS = [
@@ -992,7 +1055,6 @@ _RENAME_HEADERS = [
     "contig_length", "viral_genes", "host_genes",
     "kmer_freq", "genome_copies", "termini_type", "checkv_warnings",
 ]
-
 
 def _write_rename_map(contigs: dict, path: Path) -> None:
     """Write rename_map.tsv — the critical metadata link to annotate.py.
@@ -1027,7 +1089,6 @@ def _write_rename_map(contigs: dict, path: Path) -> None:
                 "termini_type":      info["termini_type"],
                 "checkv_warnings":   info.get("checkv_warnings", ""),
             })
-
 
 # ── Redundancy warning ───────────────────────────────────────────────────────
 
@@ -1064,7 +1125,6 @@ def _warn_naming_level_redundancy(contigs: dict, active_warnings: list[str]) -> 
             )
             log_warn(f"  [redundancy] {msg}")
             active_warnings.append(msg)
-
 
 # ── Completion panel ──────────────────────────────────────────────────────────
 
@@ -1115,7 +1175,6 @@ def _print_completion_panel(
         title=f"[bold cyan]Quality complete — {sample_id}[/bold cyan]",
         border_style="cyan", padding=(0, 2), width=120,
     ))
-
 
 # ── Read recruitment + coverage ──────────────────────────────────────────────
 
@@ -1247,7 +1306,6 @@ def _read_recruitment_coverage(
 
     return results
 
-
 def _annotate_rename_map_coverage(rename_map: Path, coverage: dict) -> None:
     """Add mean_depth, breadth, cv columns to existing rename_map.tsv."""
     if not rename_map.exists() or not coverage:
@@ -1283,7 +1341,6 @@ _TSV_HEADERS = [
     "n_complete", "n_hq", "n_mq", "n_large_nd", "n_bin",
     "n_draft", "n_dereplicated", "n_discarded",
 ]
-
 
 def _save_tsv(row: dict, path: Path) -> None:
     rows: dict[str, dict] = {}
