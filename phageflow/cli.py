@@ -27,6 +27,19 @@ _AUTO_THREADS = _default_threads()
 
 # Suffixes stripped from R1 filenames to produce a clean sample ID.
 # Applied in order; first match wins.
+# Suffixes to strip when inferring sample_id from assembly/viral FASTA filenames.
+# Order matters: longer/more-specific patterns first.
+_FASTA_STEM_PATTERNS = [
+    r"_contigs\.fasta$",   # assembly output:  SRR22410879_contigs.fasta
+    r"_contigs\.fa$",
+    r"_virus\.fna$",       # viral_id output:  SRR22410879_contigs.fasta_virus.fna
+    r"_virus\.fasta$",
+    r"_contigs\.fasta_virus\.fna$",  # full suffix
+    r"\.fasta$",
+    r"\.fna$",
+    r"\.fa$",
+]
+
 _R1_PATTERNS = [
     r"[._\-]R1_001$",   # Illumina NextSeq:  sample_R1_001.fastq.gz
     r"[._\-]R1$",       # Standard:          sample_R1.fastq.gz
@@ -69,6 +82,34 @@ def _infer_sample_id(r1: str | Path) -> str:
 
     # No pattern matched — return stem as-is
     return stem
+
+
+def _infer_sample_id_from_fasta(fasta: str | Path) -> str:
+    """Derive a sample ID from a FASTA filename (contigs or virus).
+
+    Examples
+    --------
+    SRR22410879_contigs.fasta           →  SRR22410879
+    SRR22410879_contigs.fasta_virus.fna →  SRR22410879
+    SRR22410879_virus.fna               →  SRR22410879
+    uce01_contigs.fasta_virus.fna       →  uce01
+    sample_contigs.fa                   →  sample
+
+    Applies patterns iteratively to handle compound suffixes like
+    _contigs.fasta_virus.fna (geNomad output naming convention).
+    """
+    name = Path(fasta).name
+    # Apply patterns iteratively until no more matches
+    changed = True
+    while changed:
+        changed = False
+        for pattern in _FASTA_STEM_PATTERNS:
+            new_name = re.sub(pattern, "", name, flags=re.IGNORECASE)
+            if new_name != name:
+                name = new_name.strip("._-") or name
+                changed = True
+                break
+    return name or Path(fasta).stem
 
 
 def _find_read_pairs(raw_dir: Path) -> list[tuple[Path, Path]]:
@@ -267,9 +308,7 @@ def cli():
       assembly        De novo assembly (SPAdes + MEGAHIT + cd-hit-est)
       viral-id        Viral identification (geNomad)
       quality         Genome quality and selection (CheckV)
-      annotate        Structural annotation (Pharokka → Phold → Phynteny)
-      safety          Biosafety screening (CARD + VFDB)
-      report          Final HTML report per candidate genome
+      annotate        Structural annotation (Pharokka → Phold)
 
     \b
     Or run everything at once:
@@ -405,7 +444,7 @@ def cmd_viral_id(config, workdir, output_dir, reports_dir, threads, force, proje
                  sample_id, contigs):
     """Viral identification with geNomad."""
     cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
-    sid = sample_id or _infer_sample_id(contigs)
+    sid = sample_id or _infer_sample_id_from_fasta(contigs)
     if not sample_id:
         log_info(f"  sample-id : {sid}  (inferred from {Path(contigs).name})")
     from phageflow.modules.viral_id import run
@@ -428,7 +467,7 @@ def cmd_quality(config, workdir, output_dir, reports_dir, threads, force, projec
                 sample_id, virus_fna):
     """Genome quality assessment and selection with CheckV."""
     cfg = _load(config, workdir, output_dir, reports_dir, threads, project)
-    sid = sample_id or Path(virus_fna).stem.removesuffix("_virus")
+    sid = sample_id or _infer_sample_id_from_fasta(virus_fna)
     if not sample_id:
         log_info(f"  sample-id : {sid}  (inferred from {Path(virus_fna).name})")
     from phageflow.modules.quality import run
