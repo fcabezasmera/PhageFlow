@@ -104,20 +104,30 @@ def run(
         progress.update(task, description="[1/3] fastp   — trimming + quality filter")
         _run_fastp(sample_id, r1, r2, r1_out, r2_out, json_f, html_f, log_f, cfg)
         progress.advance(task)
+        log_ok("  [1/3] fastp   — trimming + filtering complete")
 
         progress.update(task, description="[2/3] FastQC  — per-read QC")
         _run_fastqc(r1_out, r2_out, rpt_dir, log_f)
         progress.advance(task)
+        log_ok("  [2/3] FastQC  — per-read reports written")
 
         progress.update(task, description="[3/3] MultiQC — aggregate report")
         _run_multiqc(rpt_dir, sample_id)
         progress.advance(task)
+        log_ok("  [3/3] MultiQC — aggregate report ready")
 
     metrics = _parse_fastp_json(json_f)
     _check_warnings(metrics, active_warnings)
     _save_tsv(sample_id, metrics, rpt_dir / "qc_summary.tsv")
     _print_completion_panel(sample_id, r1_out, r2_out, rpt_dir, metrics, active_warnings)
     log_step(f"Module 01 completed ✓  [{sample_id}]")
+    log_info(
+        f"  Next: phageflow host-removal"
+        f"  --r1 {r1_out}"
+        f"  --r2 {r2_out}"
+        f"  --accessions GCF_XXXXXXXX.X"
+        f"  -o <output_dir>"
+    )
     return r1_out, r2_out
 
 
