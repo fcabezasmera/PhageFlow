@@ -3,58 +3,55 @@ channels:
   - conda-forge
   - bioconda
   - defaults
-
 dependencies:
-  # ── Python ────────────────────────────────────────────────────────────────
+  # ── Python runtime ──────────────────────────────────────────────────────────
   - python=3.11
   - pip
-  - click >=8.1
-  - rich >=13.0
-  - pyyaml >=6.0
-  - biopython >=1.80
-  - pandas >=2.0
-  - numpy >=1.24
-  - matplotlib
+  - click>=8.1
+  - rich>=13.0
+  - pyyaml>=6.0
+  - biopython>=1.80
+  - pandas>=2.0
+  - numpy>=1.24
+  - matplotlib>=3.7
+  - pygenomeviz>=0.4.0
   - tqdm
 
-  # ── Module 01 — QC ────────────────────────────────────────────────────────
-  - fastp
+  # ── Module 01 — QC ──────────────────────────────────────────────────────────
+  - fastp>=0.23
   - fastqc
   - multiqc
 
-  # ── Module 02 — Host removal ──────────────────────────────────────────────
+  # ── Module 02 — Host removal ─────────────────────────────────────────────────
   - bwa-mem2
-  - samtools >=1.15
+  - samtools>=1.23
   - seqtk
-  - kraken2
+  - kraken2>=2.1
   - ncbi-datasets-cli
-
-  # ── Module 03 — Assembly ──────────────────────────────────────────────────
-  - spades
-  - megahit
-  - cd-hit
-  - seqkit
-
-  # ── Module 04 — Viral ID ──────────────────────────────────────────────────
-  - genomad
-
-  # ── Module 05 — Quality ───────────────────────────────────────────────────
-  - checkv
-  - mash
-  - minimap2
-
-  # ── Module 06 — Annotation ────────────────────────────────────────────────
-  - pharokka
-  - phold
-  - phynteny_transformer
-  - dnaapler
-  - pytorch
-
-  # ── Utilities ─────────────────────────────────────────────────────────────
   - pigz
-  - mummer4
-  - diamond
-  - hmmer
-  - mafft
-  - trimal
-  - iqtree
+
+  # ── Module 03 — Assembly ─────────────────────────────────────────────────────
+  - spades>=4.0
+  - megahit>=1.2.9
+  - cd-hit
+
+  # ── Module 03b — Coverage ────────────────────────────────────────────────────
+  - coverm>=0.7
+
+  # ── Module 04 — Viral ID ─────────────────────────────────────────────────────
+  - genomad>=1.8
+
+  # ── Module 05 — Quality ──────────────────────────────────────────────────────
+  - checkv>=1.0
+  - mash>=2.3
+  - minimap2>=2.24
+  - blast>=2.14
+
+  # ── Module 06 — Annotation ───────────────────────────────────────────────────
+  - pharokka>=1.7
+  - phold>=1.0
+  - dnaapler>=0.7
+
+  # ── PhageFlow ─────────────────────────────────────────────────────────────────
+  - pip:
+    - -e .

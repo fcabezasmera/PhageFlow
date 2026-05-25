@@ -1,4 +1,4 @@
-# ── Python ────────────────────────────────────────────────────────────────────
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -9,19 +9,16 @@ dist/
 build/
 .eggs/
 
-# ── Pipeline runtime outputs ──────────────────────────────────────────────────
-# Use `phageflow init /your/project/` to keep outputs separate from code.
+# Pipeline outputs — use phageflow init to keep outputs outside repo
 results/
 reports/
 
-# ── Tool / model caches ───────────────────────────────────────────────────────
-# HuggingFace cache (phold, ESM2, ProstT5) — belongs in ~/.cache, not in repo
+# HuggingFace / model caches
 cache/
 .cache/
 .transformers_cache/
 
-# ── Raw sequencing data ───────────────────────────────────────────────────────
-# Never version raw reads — use a data registry or DVC instead
+# Raw sequencing data
 *.fastq
 *.fastq.gz
 *.fq
@@ -30,36 +27,42 @@ cache/
 *.bam.bai
 *.sam
 
-# ── Assembly intermediates ────────────────────────────────────────────────────
-*.fasta.bwt.2bit.64
-*.fasta.0123
-*.fasta.amb
-*.fasta.ann
-*.fasta.pac
-*.fasta.fai
+# Assembly index files
+*.bwt.2bit.64
+*.0123
+*.amb
+*.ann
+*.pac
+*.fai
 
-# ── Conda / virtual environments ─────────────────────────────────────────────
+# Databases — downloaded separately via phageflow download-databases
+databases/
+
+# Conda / virtual environments
 envs/
 .venv/
 env/
 
-# ── IDE ───────────────────────────────────────────────────────────────────────
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# ── OS ───────────────────────────────────────────────────────────────────────
+# OS
 .DS_Store
 Thumbs.db
+.Rhistory
 
-# ── Misc outputs that should not live in the code directory ──────────────────
-output/
-tmp/
-databases/
-.Rhistory
-databases/
-.Rhistory
-/config/
+# Project-specific config (user-customised paths)
+config/config.yaml
 *.local.yaml
+
+# Misc
+tmp/
+skipped_genomes.txt
+blast.tsv
+
+# Full conda lock file (platform-specific)
+environment-lock.yml

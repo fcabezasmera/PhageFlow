@@ -1,5 +1,5 @@
 {% set name = "phageflow" %}
-{% set version = "0.1.0" %}
+{% set version = "0.2.0" %}
 
 package:
   name: {{ name|lower }}
@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/fcabezasmera/PhageFlow/archive/v{{ version }}.tar.gz
-  # sha256: fill after creating GitHub release tag
+  # sha256: fill after creating GitHub release tag v0.2.0
 
 build:
   number: 0
@@ -22,7 +22,6 @@ requirements:
     - pip
     - setuptools >=61
   run:
-    # ── Python runtime ────────────────────────────────────────────────────────
     - python >=3.10
     - click >=8.1
     - rich >=13.0
@@ -30,49 +29,64 @@ requirements:
     - biopython >=1.80
     - pandas >=2.0
     - numpy >=1.24
-    - matplotlib-base
-    - tqdm
-    # ── Module 01 — QC ────────────────────────────────────────────────────────
-    - fastp >=1.0
-    - fastqc
-    - multiqc
-    # ── Module 02 — Host removal ──────────────────────────────────────────────
+    - matplotlib-base >=3.7
+    - pygenomeviz >=0.4.0
+    # ── QC ───────────────────────────────────────────────────────────────────
+    - fastp >=1.3
+    - fastqc >=0.12
+    - multiqc >=1.35
+    # ── Host removal ─────────────────────────────────────────────────────────
     - bwa-mem2
-    - samtools >=1.15
+    - samtools >=1.23
     - seqtk
+    - kraken2 >=2.1
     - ncbi-datasets-cli
-    - kraken2                  # optional: classification-based host removal
-    # ── Module 03 — Assembly ─────────────────────────────────────────────────
-    - spades >=3.15
+    # ── Assembly ─────────────────────────────────────────────────────────────
+    - spades >=4.2
     - megahit >=1.2.9
     - cd-hit
-    - seqkit
-    # ── Module 04 — Viral ID ─────────────────────────────────────────────────
+    # ── Coverage ─────────────────────────────────────────────────────────────
+    - coverm >=0.7
+    # ── Viral ID ─────────────────────────────────────────────────────────────
     - genomad >=1.8
-    # ── Module 05 — Quality ───────────────────────────────────────────────────
-    - checkv >=1.0
-    - mash
-    - minimap2
-    # ── Module 06 — Annotation ────────────────────────────────────────────────
-    - pharokka >=1.7
-    - phold >=1.0
-    - phynteny_transformer
-    - dnaapler
-    # ── Utilities ─────────────────────────────────────────────────────────────
+    # ── Quality ──────────────────────────────────────────────────────────────
+    - checkv >=1.1
+    - mash >=2.3
+    - minimap2 >=2.24
+    - blast >=2.14
+    # ── Annotation ───────────────────────────────────────────────────────────
+    - pharokka >=1.9
+    - phold >=1.2
+    - dnaapler >=1.3
     - pigz
 
 test:
   imports:
     - phageflow
+    - phageflow.cli
+    - phageflow.modules.qc
+    - phageflow.modules.host_removal
+    - phageflow.modules.assembly
+    - phageflow.modules.coverage
+    - phageflow.modules.viral_id
+    - phageflow.modules.quality
+    - phageflow.modules.annotate
+    - phageflow.modules.resistance
+    - phageflow.modules.runner
   commands:
     - phageflow --version
     - phageflow --help
 
 about:
   home: https://github.com/fcabezasmera/PhageFlow
-  summary: Modular bacteriophage genomics pipeline for complete genome recovery from Illumina sequencing
   license: MIT
+  license_family: MIT
   license_file: LICENSE
+  summary: Modular bacteriophage genomics pipeline for complete genome recovery
+  description: |
+    PhageFlow is a modular pipeline for recovering complete and high-quality
+    phage genomes from Illumina paired-end sequencing. It supports purified
+    phage preparations, viromes, and environmental metagenomes.
   doc_url: https://github.com/fcabezasmera/PhageFlow
   dev_url: https://github.com/fcabezasmera/PhageFlow
 
