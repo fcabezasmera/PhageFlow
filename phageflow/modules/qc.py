@@ -275,6 +275,12 @@ def _check_warnings(m: dict, active_warnings: list[str]) -> None:
             f"  ℹ Duplication {m.get('dup_pct','?')} — normal at high phage coverage (Head et al. 2014). NOT deduplicated."
         )
 
+    dup = _pct("dup_pct")
+    if dup > 70.0:
+        log_info(
+            f"  ℹ Duplication {m.get('dup_pct','?')} — normal at high phage coverage (Head et al. 2014). NOT deduplicated."
+        )
+
     try:
         ro = int(str(m.get("reads_out", "0")).replace(",", ""))
     except (ValueError, TypeError):
