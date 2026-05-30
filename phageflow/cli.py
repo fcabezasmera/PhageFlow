@@ -780,6 +780,7 @@ def cmd_download_databases(output_dir, checkv, genomad, pharokka, phold, kraken2
     if "genomad" in dbs_to_download:
         log_info("  [2] geNomad database (~7 GB)")
         db_dir = out / "genomad_db"
+        db_dir.mkdir(parents=True, exist_ok=True)
         subprocess.run(["genomad", "download-database", str(db_dir)], check=True)
         db_paths["genomad"] = str(db_dir)
         log_ok(f"  geNomad → {db_paths['genomad']}")
