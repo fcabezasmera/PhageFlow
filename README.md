@@ -4,7 +4,8 @@
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.2-green.svg)](CHANGELOG.md)
+[![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg)](https://anaconda.org/bioconda/phageflow)
 
 ---
 
@@ -153,15 +154,37 @@ Raw reads (PE150 / PE250 / PE300 Illumina)
 
 ## Installation
 
+### Recommended: Bioconda
+
+PhageFlow and all its dependencies install in one command from Bioconda:
+
+```bash
+# Into a fresh environment (recommended)
+conda create -n phageflow -c conda-forge -c bioconda phageflow
+conda activate phageflow
+
+# Or with mamba (faster solver)
+mamba create -n phageflow -c conda-forge -c bioconda phageflow
+conda activate phageflow
+
+# Verify
+phageflow --version
+```
+
+This pulls in every tool the pipeline needs (fastp, bwa-mem2, SPAdes, MEGAHIT,
+geNomad, CheckV, Pharokka, Phold, and the rest) at compatible versions.
+
+### Alternative: from source (development)
+
 ```bash
 git clone https://github.com/fcabezasmera/PhageFlow.git
 cd PhageFlow
 
-# Create environment
+# Create environment with all tools
 mamba env create -f environment.yml
 conda activate phageflow
 
-# Install PhageFlow (editable mode)
+# Install PhageFlow in editable mode
 pip install -e .
 
 # Verify
@@ -176,40 +199,75 @@ phageflow --version
 
 ## Database Setup
 
-All paths are set in `config/config.yaml` under `databases:`.
+PhageFlow needs several reference databases. The easiest way to install them is the
+built-in `download-databases` command, which fetches each one from its official source
+and writes the resolved paths to `~/.config/phageflow/config.yaml` so the pipeline finds
+them automatically.
 
-### CheckV (~2 GB)
+### One-command setup (recommended)
 
 ```bash
-checkv download_database databases/checkv_db
+# Download everything (~47 GB total) — CheckV, geNomad, Pharokka, Phold, Kraken2
+phageflow download-databases --all -o ~/phageflow_databases
 ```
 
-### geNomad (~7 GB)
+This writes `~/.config/phageflow/config.yaml` with the database locations, so subsequent
+`phageflow run` calls require no extra configuration.
+
+### Individual databases
+
+Download only what you need:
 
 ```bash
+phageflow download-databases --checkv --genomad -o ~/phageflow_databases
+phageflow download-databases --pharokka --phold -o ~/phageflow_databases
+phageflow download-databases --kraken2 -o ~/phageflow_databases
+```
+
+| Flag | Database | Size | Source |
+|------|----------|------|--------|
+| `--checkv` | CheckV | ~2 GB | CheckV portal |
+| `--genomad` | geNomad | ~7 GB | geNomad release |
+| `--pharokka` | Pharokka | ~2 GB | Pharokka databases |
+| `--phold` | Phold | ~18 GB | Phold install |
+| `--kraken2` | Kraken2 standard-16GB | ~16 GB | AWS genome-idx |
+| `--all` | All of the above | ~47 GB | — |
+
+### Configuration priority
+
+Database paths are resolved in this order (highest first):
+
+1. CLI flag: `phageflow -c /path/config.yaml`
+2. Project config: `./config/config.yaml`
+3. User config: `~/.config/phageflow/config.yaml` (written by `download-databases`)
+4. Environment variable: `PHAGEFLOW_DB=/path/to/databases`
+5. Bundled defaults
+
+### Manual setup (alternative)
+
+If you prefer to manage databases yourself, install each one and set its path in
+`config/config.yaml` under `databases:`:
+
+```bash
+checkv download_database  databases/checkv_db
 genomad download-database databases/genomad_db
+install_databases.py -o   databases/pharokka_db
+phold install -d          databases/phold_db
 ```
 
-### Pharokka (~2 GB)
-
-```bash
-install_databases.py -o databases/pharokka_db
-```
-
-### Phold (~18 GB)
-
-```bash
-phold install -d databases/phold_db
-```
-
-### Kraken2 (optional, ~16 GB standard)
-
-Download from [https://benlangmead.github.io/aws-indexes/k2](https://benlangmead.github.io/aws-indexes/k2).  
-Set `databases.kraken2` in config.yaml.
+For Kraken2, download a pre-built index from
+[https://benlangmead.github.io/aws-indexes/k2](https://benlangmead.github.io/aws-indexes/k2)
+and set `databases.kraken2` in config.yaml.
 
 ---
 
 ## Quick Start
+
+### Set up databases (first time only)
+
+```bash
+phageflow download-databases --all -o ~/phageflow_databases
+```
 
 ### Run the full pipeline
 
@@ -686,6 +744,7 @@ Commands:
   annotate      Structural annotation (Pharokka → Phold)
   resistance    AMR + virulence + ACR + defense screening
   run           Execute full pipeline for one or more samples
+  download-databases  Download all reference databases + write user config
   config        Copy default config.yaml template
   init          Initialise a new project directory
 
