@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Wait for tarball availability
+        run: sleep 30
+
+      - name: Compute sha256
+        id: sha256
+        run: |
+          SHA=$(curl -sL https://github.com/${{ github.repository }}/archive/${{ github.ref_name }}.tar.gz | sha256sum | cut -d' ' -f1)
+          echo "sha256=$SHA" >> $GITHUB_OUTPUT
+          echo "SHA256: $SHA"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Installation
+```bash
+            conda install -c bioconda phageflow=${{ steps.version.outputs.version }}
+```
+
+            ## Bioconda recipe update
+```yaml
+            {% set version = "${{ steps.version.outputs.version }}" %}
+            sha256: ${{ steps.sha256.outputs.sha256 }}
+```

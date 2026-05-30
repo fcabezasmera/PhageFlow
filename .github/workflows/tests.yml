@@ -1,0 +1,47 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Check imports
+        run: |
+          python -c "from phageflow.modules import qc, host_removal, assembly, coverage, viral_id, quality, annotate, resistance, runner"
+          python -c "from phageflow.cli import cli"
+          echo "✓ All imports OK"
+
+      - name: Check CLI
+        run: |
+          phageflow --help
+          phageflow --version
+          echo "✓ CLI OK"
+
+      - name: Check config defaults
+        run: |
+          python3 -c "
+          from phageflow.utils.config import Config
+          cfg = Config()
+          assert cfg.qc.average_qual == 20
+          assert cfg.qc.length_required == 50
+          assert cfg.genomad.composition == 'auto'
+          assert cfg.genomad.rescue_min_length_bp == 3000
+          assert cfg.checkv.large_nd_rescue_bp == 20000
+          assert '141' not in cfg.assembly.kmers
+          print('✓ Config defaults OK')
+          "
