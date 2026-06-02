@@ -430,13 +430,39 @@ def _run_phold(cfg, candidate_id, input_gbk, phold_dir, gbk_out, rpt_dir, force)
         f"card_vfdb_evalue={_PHOLD_CARD_EVALUE}"
     )
 
+    phold_log = rpt_dir / f"{candidate_id}_phold.log"
+
+    def _phold_failed_on_gpu() -> bool:
+        """Detect a Foldseek GPU failure in the phold log (no physical GPU,
+        CUDA driver missing, etc.). The 3Di/db steps succeed; only the
+        'foldseek search ... --gpu 1' call returns non-zero."""
+        if not phold_log.exists():
+            return False
+        try:
+            txt = phold_log.read_text(errors="replace")
+        except Exception:
+            return False
+        return "--gpu 1" in txt and "Error calling foldseek search" in txt
+
     try:
-        run_silent(cmd, log_file=rpt_dir / f"{candidate_id}_phold.log")
+        run_silent(cmd, log_file=phold_log)
         log_ok("  [Phold] OK")
     except Exception as e:
+        # If we ran with GPU and Foldseek's GPU search failed, retry once on CPU.
+        # Many cluster compute nodes lack a physical GPU even when foldseek has
+        # GPU support compiled in; CPU search produces identical annotations.
+        if use_gpu and _phold_failed_on_gpu():
+            log_warn("  [Phold] GPU search failed — retrying with --cpu")
+            cmd_cpu = ["--cpu" if c == "--foldseek_gpu" else c for c in cmd]
+            try:
+                run_silent(cmd_cpu, log_file=phold_log)
+                log_ok("  [Phold] OK (CPU fallback)")
+                return
+            except Exception as e2:
+                log_warn(f"  [Phold] CPU fallback also failed: {e2}")
+                e = e2  # fall through to Pharokka-GBK handling below
         # Phold exits 1 when Foldseek finds no structural hits (very small/divergent genomes).
         # Fall back to Pharokka GBK as the canonical output.
-        phold_log = rpt_dir / f"{candidate_id}_phold.log"
         no_hits = False
         if phold_log.exists():
             try:
