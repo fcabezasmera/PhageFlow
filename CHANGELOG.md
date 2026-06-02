@@ -1,30 +1,34 @@
-# Changelog — PhageFlow
+# Changelog
 
-## [0.1.0] — 2025-05
+All notable changes to PhageFlow are documented here.
+This project adheres to [Semantic Versioning](https://semver.org/).
 
-### Added
-- Module 00: conda envs (9), host genomes (4), read symlinks + pigz compression
-- Module 01: FastQC + MultiQC raw reads (8 samples, 2 cohorts)
-- Module 02: fastp trimming — all samples >85% pass, s1 lowest at 87.3%
-- Module 03: multi-host removal (bwa-mem2)
-  - 03b: per-host removal (MRSA/Efae/Kpn)
-  - 03c: combined 3-host removal
-  - 03d: cross-mapping diagnosis — detected E. coli in s2/s3/s4
-  - 03e: 4-host removal adding E. coli K-12 (final canonical reads)
-- Module 05: metaSPAdes assembly (--meta, 8 samples)
-- Module 06: Phables v1.5 GFA-based resolution
-  - No complex components found — consistent with purified phage at high coverage
-  - Gurobi 13 academic license required; internal YAML patches documented
-- Module 07: CheckV v1.0.1 quality assessment
-  - geNomad v1.12 added as primary viral classifier (DB v1.9)
-  - 4 complete genomes: s3 (Autographiviridae), uce01/02/03 (Ackermannviridae)
-- Module 09: Pharokka v1.9.1 structural annotation (in progress)
+## [1.0.0] - 2026-06-01
 
-### Key biological findings
-- s3: Autographiviridae (T7-like Podovirus) — 39kb, DTR, Complete, score=0.983
-- s1: Herelleviridae (Myovirus) — 130kb, fragmentado
-- s2: E. faecalis phage — 98kb, fragmentado (E. coli contamination)
-- s4: E. faecalis phage — 148kb, fragmentado
-- uce01-03: Ackermannviridae (Myovirus) — 157.5kb, Complete, DTR, 31 hallmarks
-- uce04: Ackermannviridae — 157.3kb, fragmentado (3 contigs)
-- E. coli contamination in UISEK s2/s3/s4: confirmed by genome coverage >89%
+First production release. Complete 7-module pipeline validated end-to-end on
+purified phage, virome, and metagenome datasets, including a multi-phage
+recovery (4 distinct genomes from a single K. pneumoniae sample) on an HPC cluster.
+
+### Pipeline
+- **01 qc**: fastp + FastQC + MultiQC, read-length auto-detection (PE150/250/300)
+- **02 host-removal**: bwa-mem2, Kraken2, and pass-through modes
+- **03 assembly**: SPAdes + MEGAHIT + cd-hit-est, k-mer range by read length
+- **03b coverage**: CoverM per-contig profiling
+- **04 viral-id**: geNomad with 3 kb rescue tier, CrAss-like genetic-code detection
+- **05 quality**: CheckV tiers, blastn/minimap2 dereplication, circular-rotation detection
+- **06 annotate**: Pharokka + Phold two-tier cascade (--hyps strategy)
+- **07 resistance**: dual-evidence AMR/VFDB + ACR + DefenseFinder + NetFlax
+- **runner**: full pipeline with --from-module resume and per-sample error handling
+
+### Infrastructure
+- `phageflow download-databases`: one-command setup for CheckV, geNomad, Pharokka,
+  Phold (incl. GPU structure DB), and Kraken2 standard-16GB; writes user config
+- Config hierarchy: CLI > project > ~/.config/phageflow/ > bundled; `PHAGEFLOW_DB` env var
+- Available on Bioconda: `conda install -c bioconda phageflow`
+
+### Robustness fixes since initial bioconda submission
+- CLI now loads user config from ~/.config/phageflow/config.yaml
+- geNomad nested database path (genomad_db/genomad_db) resolved automatically
+- Phold GPU database built during download-databases
+- Phold auto-retries on CPU when Foldseek GPU search fails (no-GPU clusters)
+- Phold falls back to Pharokka GBK for tiny/divergent genomes with no structural hits

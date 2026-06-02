@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phageflow"
-version = "0.2.3"
+version = "1.0.0"
 description = "Modular bacteriophage genomics pipeline for complete genome recovery from Illumina sequencing"
 readme = "README.md"
 requires-python = ">=3.10"
