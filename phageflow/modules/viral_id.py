@@ -123,6 +123,13 @@ def run(
             "genomad download-database databases/"
         )
         raise FileNotFoundError(f"geNomad database not found: {db}")
+    # Defensive: `genomad download-database X` creates X/genomad_db/ (nested).
+    # If the configured path lacks version.txt but a nested genomad_db/ has it,
+    # resolve to the nested directory so older configs keep working.
+    db = Path(db)
+    if not (db / "version.txt").exists() and (db / "genomad_db" / "version.txt").exists():
+        db = db / "genomad_db"
+        log_info(f"  geNomad DB resolved to nested path: {db}")
 
     require_tools(*TOOLS)
     active_warnings: list[str] = []
