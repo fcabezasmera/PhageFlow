@@ -389,6 +389,17 @@ def _run_phold(cfg, candidate_id, input_gbk, phold_dir, gbk_out, rpt_dir, force)
 
     phold_db   = cfg.databases.phold
     use_gpu    = getattr(cfg.annotate, "phold_gpu",        True)
+    # Defensive: --foldseek_gpu needs the GPU-formatted structure DB
+    # (all_phold_structures_gpu). If it is missing, fall back to CPU so
+    # annotation still runs instead of failing with a Phold exit 1.
+    # Build it with: phold install -d <db> --foldseek_gpu
+    if use_gpu and not (Path(phold_db) / "all_phold_structures_gpu").exists():
+        log_warn(
+            "  [Phold] GPU database (all_phold_structures_gpu) not found — "
+            "falling back to CPU mode. Run 'phold install -d "
+            f"{phold_db} --foldseek_gpu' to enable GPU acceleration."
+        )
+        use_gpu = False
     batch_size = getattr(cfg.annotate, "phold_batch_size", 1)
     # phold_finetune default matches AnnotateConfig and config.yaml (True)
     finetune   = getattr(cfg.annotate, "phold_finetune",   True)

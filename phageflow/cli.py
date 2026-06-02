@@ -807,6 +807,20 @@ def cmd_download_databases(output_dir, checkv, genomad, pharokka, phold, kraken2
         log_info("  [4] Phold database (~18 GB)")
         db_dir = out / "phold_db"
         subprocess.run(["phold", "install", "-d", str(db_dir)], check=True)
+        # PhageFlow runs Phold with --foldseek_gpu by default, which needs the
+        # GPU-formatted structure database (all_phold_structures_gpu*).
+        # Build it now so annotation works on GPU nodes without manual steps.
+        # This is a fast local reformat (no extra download) and is harmless on
+        # CPU-only systems (the files are simply unused).
+        try:
+            subprocess.run(["phold", "install", "-d", str(db_dir), "--foldseek_gpu"],
+                           check=True)
+            log_ok("  Phold GPU database built (all_phold_structures_gpu)")
+        except subprocess.CalledProcessError:
+            log_warn(
+                "  Phold --foldseek_gpu reformat failed. CPU annotation will "
+                "still work; set annotate.phold_gpu=false in config for GPU-less runs."
+            )
         db_paths["phold"] = str(db_dir)
         log_ok(f"  Phold → {db_paths['phold']}")
 
