@@ -179,14 +179,21 @@ def _load(
     cfg_path = Path(config)
     _using_bundled = False
     if not cfg_path.exists():
-        from importlib.resources import files as _res_files
-        _default = Path(str(_res_files("phageflow.config").joinpath("default_config.yaml")))
-        if _default.exists():
-            cfg_path = _default
-            _using_bundled = True
+        # Config resolution hierarchy: CLI > project > user > bundled
+        from phageflow.utils.config import _find_user_config
+        user_cfg = _find_user_config()
+        if user_cfg is not None:
+            cfg_path = user_cfg
+            log_info(f"  Using user config: {user_cfg}")
         else:
-            log_error(f"Config file not found: {cfg_path}")
-            sys.exit(1)
+            from importlib.resources import files as _res_files
+            _default = Path(str(_res_files("phageflow.config").joinpath("default_config.yaml")))
+            if _default.exists():
+                cfg_path = _default
+                _using_bundled = True
+            else:
+                log_error(f"Config file not found: {cfg_path}")
+                sys.exit(1)
 
     wd  = Path(workdir) if workdir else (Path(".").resolve() if _using_bundled else cfg_path.parent.parent)
     cfg = load_config(cfg_path, workdir=wd)

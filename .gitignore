@@ -66,3 +66,4 @@ blast.tsv
 
 # Full conda lock file (platform-specific)
 environment-lock.yml
+bioconda-recipes/
